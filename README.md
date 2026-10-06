@@ -234,3 +234,5 @@ Refer to [`firmware/circuit_diagram.md`](firmware/circuit_diagram.md) for full s
 
 ## 7. License
 Educational & University Academic Use — MIT License.
+#   s m a r t - l i b r a r y  
+ 
