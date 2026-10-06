@@ -1,0 +1,53 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ==============================================================================
+// Smart Library Seat Finder - ESP8266 Firmware Configuration Template
+// Rename this file to "config.h" and insert your local network credentials.
+// NEVER commit your real Wi-Fi credentials or device secret token to git.
+// ==============================================================================
+
+// Wi-Fi Access Point Credentials
+#define WIFI_SSID       "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+
+// Cloud Application API Configuration
+// Replace with your Vercel deployment domain or local IP (e.g. "https://smart-library.vercel.app")
+#define API_HOST        "your-deployment.vercel.app"
+#define API_PORT        443   // 443 for HTTPS (Vercel), 80 for HTTP local testing
+#define USE_HTTPS       true  // Set to true for production HTTPS
+
+// Device Authentication Secret
+// Must exactly match the DEVICE_API_TOKEN environment variable in your .env.local
+#define DEVICE_ID       "ESP8266_DEV01"
+#define DEVICE_TOKEN    "your-random-strong-device-secret-token-here"
+#define FIRMWARE_VER    "1.0.0"
+
+// Pin Assignments for NodeMCU (ESP-12E)
+#define PIN_SEAT_1      D1  // GPIO5  - Seat 1 IR Sensor OUT
+#define PIN_SEAT_2      D2  // GPIO4  - Seat 2 IR Sensor OUT
+#define PIN_SEAT_3      D5  // GPIO14 - Seat 3 IR Sensor OUT
+#define PIN_SEAT_4      D6  // GPIO12 - Seat 4 IR Sensor OUT
+#define PIN_SOUND_DO    D7  // GPIO13 - Digital Sound Sensor DO
+#define PIN_BUZZER      D0  // GPIO16 - Active Buzzer Driver Control
+#define PIN_STATUS_LED  D3   // GPIO0 - External Status LED (Anode to D3 via 220Ω-330Ω, Cathode to GND)
+#define STATUS_LED_ACTIVE_LOGIC HIGH // HIGH turns ON external LED connected to GND
+
+// Sensor Logic Levels (Adjust based on your sensor module active level)
+// FC-51 / TCRT5000 IR obstacle sensors typically pull LOW when obstacle (person) detected
+#define IR_OCCUPIED_LOGIC   LOW   // Set LOW if sensor outputs LOW when person is present
+
+// Digital sound sensor (LM393 comparator) output logic when sound threshold is exceeded
+#define SOUND_TRIGGER_LOGIC HIGH  // Typically HIGH when threshold breached (or LOW for some modules)
+
+// Active buzzer drive logic (driven via NPN transistor or active-HIGH module)
+#define BUZZER_ACTIVE_LOGIC HIGH
+
+// Timing Parameters (in milliseconds)
+#define HEARTBEAT_INTERVAL_MS   10000  // Heartbeat & status sync every 10 seconds
+#define DEBOUNCE_TIME_MS        600    // Debounce time for IR seat presence
+#define SOUND_DEBOUNCE_MS       200    // Persistence window before sound triggers buzzer
+#define BUZZER_BEEP_DURATION_MS 1500   // Local buzzer active beep duration (1.5 seconds)
+#define NOISE_ALERT_COOLDOWN_MS 8000   // Cooldown between repeated buzzer triggers (8 seconds)
+
+#endif // CONFIG_H

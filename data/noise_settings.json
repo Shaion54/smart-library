@@ -1,0 +1,7 @@
+{
+  "threshold_db": 45,
+  "mode": "strict",
+  "alert_sound_enabled": true,
+  "auto_reset_seconds": 30,
+  "updated_at": "2026-10-06T15:25:29.388Z"
+}
