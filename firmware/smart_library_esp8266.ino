@@ -24,12 +24,27 @@
 // ==============================================================================
 #define WIFI_SSID               "Loding......."
 #define WIFI_PASSWORD           "1234@4321.L"
-#define API_HOST                "192.168.0.241"  // Local Server IP (Next.js PC)
-#define API_PORT                3000             // Local Port (3000)
-#define USE_HTTPS               false            // Set to false for local HTTP testing
+
+// --- Choose Deployment Target: Vercel Cloud vs Local PC ---
+// Set USE_VERCEL_DEPLOYMENT to true for Vercel Cloud hosting.
+// Set USE_VERCEL_DEPLOYMENT to false for Local PC testing.
+#define USE_VERCEL_DEPLOYMENT   true
+
+#if USE_VERCEL_DEPLOYMENT
+  // Replace with your Vercel deployment domain (without http:// or https://)
+  // Example: "smart-library.vercel.app"
+  #define API_HOST              "your-project.vercel.app"
+  #define API_PORT              443
+  #define USE_HTTPS             true
+#else
+  #define API_HOST              "192.168.0.241"  // Local Server IP (Next.js PC)
+  #define API_PORT              3000             // Local Port (3000)
+  #define USE_HTTPS             false            // Local HTTP testing
+#endif
+
 #define DEVICE_ID               "ESP8266_DEV01"
 #define DEVICE_TOKEN            "library_device_secret_token_12345"
-#define FIRMWARE_VER            "1.2.0"
+#define FIRMWARE_VER            "1.3.0"
 
 // ==============================================================================
 // 2. Hardware Pin Assignments (NodeMCU ESP8266)
@@ -656,10 +671,22 @@ void sendNoiseAlert(bool noiseDetected, int soundDb) {
   String url = buildApiUrl("/api/device/noise");
 
   HTTPClient http;
+  bool beginOk = false;
+
+  WiFiClientSecure secureClient;
   WiFiClient regularClient;
+
   regularClient.setTimeout(2500);
 
-  if (!http.begin(regularClient, url)) {
+  if (url.startsWith("https://")) {
+    secureClient.setInsecure();
+    secureClient.setTimeout(2500);
+    beginOk = http.begin(secureClient, url);
+  } else {
+    beginOk = http.begin(regularClient, url);
+  }
+
+  if (!beginOk) {
     return;
   }
 
