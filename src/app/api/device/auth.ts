@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 // Simple in-memory rate limiter per IP / token
 const requestTimestamps: Map<string, number[]> = new Map();
 const RATE_LIMIT_WINDOW_MS = 10_000; // 10 seconds window
-const MAX_REQUESTS_PER_WINDOW = 25; // max 25 requests per 10 seconds
+const MAX_REQUESTS_PER_WINDOW = 60; // max 60 requests per 10 seconds (allows 1-sec heartbeat + alerts)
 
 export function validateDeviceRequest(req: NextRequest): { valid: boolean; error?: string; status: number } {
   const configuredToken = process.env.DEVICE_API_TOKEN;

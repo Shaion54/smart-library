@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { SeatWithStatus } from "@/types/database";
-import { formatToLocalTime } from "@/lib/seat-utils";
+import { formatToLocalTime, getRemainingTime } from "@/lib/seat-utils";
 import StatusBadge from "@/components/StatusBadge";
-import { Armchair, Clock, User, Wrench, WifiOff, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Armchair, Clock, User, Wrench, WifiOff, CheckCircle2, AlertTriangle, Lock } from "lucide-react";
 
 interface SeatCardProps {
   seat: SeatWithStatus;
@@ -39,26 +39,30 @@ export default function SeatCard({
 
   const isWalkInOccupancy = Boolean(seat.deviceOnline && seat.is_occupied && !seat.activeReservation);
 
-  // Compute countdown
+  // Compute countdown in Hours, Minutes, and Seconds
   let countdownText = "";
+  let hours = 0;
+  let mins = 0;
+  let secs = 0;
   if (seat.activeReservation) {
-    const remainingSec = Math.max(
-      0,
-      Math.floor((new Date(seat.activeReservation.end_time).getTime() - now) / 1000)
+    const remaining = getRemainingTime(
+      seat.activeReservation.end_time,
+      seat.activeReservation.start_time
     );
-    const mins = Math.floor(remainingSec / 60);
-    const secs = remainingSec % 60;
-    countdownText = `${mins}m ${secs.toString().padStart(2, "0")}s left`;
+    hours = remaining.hours;
+    mins = remaining.minutes;
+    secs = remaining.seconds;
+    countdownText = remaining.formatted;
   }
 
   return (
     <div
-      className={`bg-white border rounded-xl p-5 flex flex-col justify-between transition-all shadow-sm ${
+      className={`bg-white border rounded-2xl p-5 flex flex-col justify-between transition-all shadow-sm hover:shadow-md ${
         isWalkInOccupancy
           ? "border-amber-300 ring-1 ring-amber-200"
           : isReservedByMe
-          ? "border-blue-300 ring-1 ring-blue-200"
-          : "border-zinc-200 hover:border-zinc-300"
+          ? "border-indigo-300 ring-1 ring-indigo-200"
+          : "border-zinc-200 hover:border-indigo-200"
       }`}
     >
       {/* Top Header */}
@@ -66,7 +70,7 @@ export default function SeatCard({
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3">
             <div
-              className={`w-10 h-10 rounded-lg border flex items-center justify-center transition-colors ${
+              className={`w-11 h-11 rounded-xl border flex items-center justify-center transition-colors shadow-xs ${
                 !seat.deviceOnline
                   ? "bg-zinc-50 border-zinc-200 text-zinc-400"
                   : seat.is_maintenance
@@ -76,7 +80,7 @@ export default function SeatCard({
                     ? "bg-amber-50 border-amber-300 text-amber-700"
                     : "bg-rose-50 border-rose-200 text-rose-700"
                   : seat.activeReservation
-                  ? "bg-blue-50 border-blue-200 text-blue-700"
+                  ? "bg-indigo-50 border-indigo-200 text-indigo-700"
                   : "bg-emerald-50 border-emerald-200 text-emerald-700"
               }`}
             >
@@ -94,16 +98,16 @@ export default function SeatCard({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-semibold text-zinc-900">{seat.id}</h3>
+                <h3 className="text-base font-bold text-zinc-900">{seat.id}</h3>
                 {isReservedByMe && (
-                  <span className="text-[10px] font-medium text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                  <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
                     Your Booking
                   </span>
                 )}
                 {isWalkInOccupancy && (
                   <span className="text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-full flex items-center gap-1">
                     <AlertTriangle className="w-3 h-3 text-amber-600" />
-                    Walk-in
+                    Unreserved Occupant
                   </span>
                 )}
               </div>
@@ -115,7 +119,7 @@ export default function SeatCard({
         </div>
 
         {/* Detailed Presence & Reservation Breakdown */}
-        <div className="space-y-2 py-3 border-t border-b border-zinc-100 text-xs">
+        <div className="space-y-2.5 py-3 border-t border-b border-zinc-100 text-xs">
           {/* Physical desk presence */}
           <div className="flex items-center justify-between text-zinc-600">
             <span className="flex items-center gap-1.5">
@@ -130,81 +134,102 @@ export default function SeatCard({
                     : "bg-emerald-500"
                 }`}
               />
-              Desk Presence:
+              Physical Status:
             </span>
             <span className="font-medium text-zinc-900">
               {!seat.deviceOnline ? (
                 <span className="text-zinc-400">Offline</span>
               ) : seat.is_occupied ? (
                 <span className={isWalkInOccupancy ? "text-amber-700 font-semibold" : "text-rose-600 font-semibold"}>
-                  {isWalkInOccupancy ? "Occupied (Unreserved)" : "In Use"}
+                  {isWalkInOccupancy ? "Present (No Reservation)" : "Occupied"}
                 </span>
               ) : (
-                <span className="text-emerald-600 font-semibold">Vacant</span>
+                <span className="text-emerald-600 font-semibold">Vacant Desk</span>
               )}
             </span>
           </div>
 
-          {/* Reservation info */}
-          <div className="flex items-center justify-between text-zinc-600">
-            <span className="flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 text-zinc-400" />
-              Reservation:
-            </span>
-            <span className="font-medium text-zinc-900">
-              {seat.activeReservation ? (
-                <span className="text-blue-600 font-medium">
-                  {countdownText} ({formatToLocalTime(seat.activeReservation.end_time)})
+          {/* Reservation Schedule Details: Start Time, End Time & Remaining */}
+          {seat.activeReservation ? (
+            <div className="bg-zinc-50 rounded-lg p-2.5 space-y-1.5 border border-zinc-100">
+              <div className="flex items-center justify-between text-[11px] text-zinc-600">
+                <span className="text-zinc-500">Start Time:</span>
+                <span className="font-semibold text-zinc-800">
+                  {formatToLocalTime(seat.activeReservation.start_time)}
                 </span>
-              ) : (
-                <span className="text-zinc-400">No Active Booking</span>
-              )}
-            </span>
-          </div>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-zinc-600">
+                <span className="text-zinc-500">End Time:</span>
+                <span className="font-semibold text-zinc-800">
+                  {formatToLocalTime(seat.activeReservation.end_time)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between pt-1 border-t border-zinc-200/60 text-[11px]">
+                <span className="text-indigo-600 font-medium flex items-center gap-1">
+                  <Clock className="w-3 h-3" /> Remaining:
+                </span>
+                <span className="font-mono font-bold text-indigo-700 bg-indigo-50/80 px-1.5 py-0.5 rounded border border-indigo-100">
+                  {countdownText}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between text-zinc-500">
+              <span className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-zinc-400" />
+                Schedule:
+              </span>
+              <span className="text-zinc-400">No Active Booking</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Action Footer */}
-      <div className="pt-4 mt-1">
+      <div className="pt-3.5 mt-1">
         {/* If Reserved by current student */}
         {isReservedByMe && onCancelClick && seat.activeReservation && (
           <button
             onClick={() => onCancelClick(seat.activeReservation!.id, seat.id)}
             disabled={isLoading}
-            className="w-full py-2 px-3 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors disabled:opacity-50"
+            className="w-full py-2.5 px-3 text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-colors disabled:opacity-50"
           >
             Cancel My Reservation
           </button>
         )}
 
-        {/* If Available and student can reserve */}
+        {/* If Available and student can reserve (or login to reserve) */}
         {!isReservedByMe && seat.displayStatus === "Available" && onReserveClick && (
           <button
             onClick={() => onReserveClick(seat.id)}
             disabled={isLoading}
-            className="w-full py-2 px-3 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shadow-sm disabled:opacity-50 flex items-center justify-center gap-1.5"
+            className="w-full py-2.5 px-3 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-all shadow-sm hover:shadow flex items-center justify-center gap-1.5 active:scale-[0.98]"
           >
-            Reserve Desk
+            {!currentUserId && <Lock className="w-3.5 h-3.5" />}
+            {currentUserId ? "Reserve Desk" : "Sign In to Reserve"}
           </button>
         )}
 
-        {/* If Occupied */}
-        {!isReservedByMe && seat.displayStatus === "Occupied" && (
+        {/* User Requirement: Even if someone is sitting without booking (Walk-in), allow booking! */}
+        {!isReservedByMe && isWalkInOccupancy && onReserveClick && (
           <button
-            disabled
-            className="w-full py-2 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-lg cursor-not-allowed text-center"
+            onClick={() => onReserveClick(seat.id)}
+            disabled={isLoading}
+            className="w-full py-2.5 px-3 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-xl transition-all shadow-xs flex items-center justify-center gap-1.5 active:scale-[0.98]"
+            title={currentUserId ? "Claim this unreserved walk-in seat" : "Sign in to claim this unreserved walk-in seat"}
           >
-            Currently Occupied
+            {!currentUserId && <Lock className="w-3.5 h-3.5" />}
+            {currentUserId ? "Book Desk (Unreserved Walk-in)" : "Sign In to Claim Desk"}
           </button>
         )}
 
-        {/* If Reserved by another student */}
-        {!isReservedByMe && seat.displayStatus === "Reserved" && (
+        {/* If Occupied with active booking and not by me */}
+        {!isReservedByMe && seat.activeReservation && (
           <button
             disabled
-            className="w-full py-2 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-lg cursor-not-allowed text-center"
+            className="w-full py-2.5 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-xl cursor-not-allowed text-center"
           >
-            Reserved until {formatToLocalTime(seat.activeReservation?.end_time)}
+            Booked until {formatToLocalTime(seat.activeReservation.end_time)}
           </button>
         )}
 
@@ -212,7 +237,7 @@ export default function SeatCard({
         {seat.displayStatus === "Maintenance" && !isAdmin && (
           <button
             disabled
-            className="w-full py-2 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-lg cursor-not-allowed text-center"
+            className="w-full py-2.5 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-xl cursor-not-allowed text-center"
           >
             Unavailable (Maintenance)
           </button>
@@ -222,9 +247,9 @@ export default function SeatCard({
         {seat.displayStatus === "Offline" && !isAdmin && (
           <button
             disabled
-            className="w-full py-2 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-lg cursor-not-allowed text-center"
+            className="w-full py-2.5 px-3 text-xs font-medium text-zinc-400 bg-zinc-50 border border-zinc-200 rounded-xl cursor-not-allowed text-center"
           >
-            Status Unavailable
+            Status Offline
           </button>
         )}
 

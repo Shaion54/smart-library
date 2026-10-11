@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { validateDeviceRequest } from "../auth";
-
 import { getNoiseSettings } from "@/lib/noise-settings";
+import { getSyncedIso } from "@/lib/time-sync";
+
+export const dynamic = "force-dynamic";
 
 const noiseSchema = z.object({
   device_id: z.string().min(1).max(50),
@@ -39,7 +41,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const supabase = createAdminClient();
-    const nowIso = new Date().toISOString();
+    const nowIso = getSyncedIso();
     const settings = await getNoiseSettings();
 
     // Determine noise breach: either direct trigger or sound level >= configured threshold

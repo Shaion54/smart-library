@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { SeatWithStatus } from "@/types/database";
-import { formatToLocalTime } from "@/lib/seat-utils";
+import { formatToLocalTime, getRemainingTime } from "@/lib/seat-utils";
 import {
   Armchair,
   Clock,
@@ -15,6 +15,7 @@ import {
   Info,
   BookOpen,
   Volume2,
+  Lock,
 } from "lucide-react";
 
 interface LibraryFloorMapProps {
@@ -74,16 +75,13 @@ export default function LibraryFloorMap({
     if (!seat.deviceOnline) return "Offline";
     if (seat.is_maintenance) return "In Maintenance";
     if (seat.is_occupied) {
-      return !seat.activeReservation ? "Walk-in (Unreserved)" : "Occupied (Booked)";
+      if (!seat.activeReservation) return "Walk-in (Unreserved)";
+      const rem = getRemainingTime(seat.activeReservation.end_time, seat.activeReservation.start_time);
+      return `Occupied (${rem.formatted} left)`;
     }
     if (seat.activeReservation) {
-      const remainingSec = Math.max(
-        0,
-        Math.floor((new Date(seat.activeReservation.end_time).getTime() - now) / 1000)
-      );
-      const mins = Math.floor(remainingSec / 60);
-      const secs = remainingSec % 60;
-      return `Reserved (${mins}m ${secs}s left)`;
+      const rem = getRemainingTime(seat.activeReservation.end_time, seat.activeReservation.start_time);
+      return `Reserved (${rem.formatted} left)`;
     }
     return "Available to Book";
   };
@@ -247,46 +245,110 @@ export default function LibraryFloorMap({
 
       {/* Selected Seat Quick Inspection Drawer */}
       {selectedSeat && (
-        <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all animate-fadeIn">
-          <div className="space-y-1">
+        <div className="bg-indigo-50/70 border border-indigo-200 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all animate-fadeIn">
+          <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <span className="text-base font-bold text-zinc-900">
                 Desk {selectedSeat.id} (Seat #{selectedSeat.seat_number})
               </span>
               <span
-                className={`text-xs px-2.5 py-0.5 rounded-full font-medium border ${getSeatColor(
+                className={`text-xs px-2.5 py-0.5 rounded-full font-semibold border ${getSeatColor(
                   selectedSeat
                 )}`}
               >
                 {selectedSeat.displayStatus}
               </span>
+              {selectedSeat.deviceOnline && selectedSeat.is_occupied && !selectedSeat.activeReservation && (
+                <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-300 px-2 py-0.5 rounded-full font-bold">
+                  Walk-in (Unreserved)
+                </span>
+              )}
             </div>
-            <p className="text-xs text-zinc-600">
-              Desk Presence:{" "}
-              <strong className={selectedSeat.is_occupied ? "text-rose-600" : "text-emerald-600"}>
-                {selectedSeat.is_occupied ? "In Use" : "Vacant"}
-              </strong>{" "}
-              • Booking:{" "}
-              <strong>
-                {selectedSeat.activeReservation
-                  ? `Reserved until ${formatToLocalTime(selectedSeat.activeReservation.end_time)}`
-                  : "None"}
-              </strong>
-            </p>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-600">
+              <span>
+                Desk Presence:{" "}
+                <strong
+                  className={
+                    selectedSeat.is_occupied
+                      ? !selectedSeat.activeReservation
+                        ? "text-amber-700"
+                        : "text-rose-600"
+                      : "text-emerald-600"
+                  }
+                >
+                  {selectedSeat.is_occupied
+                    ? !selectedSeat.activeReservation
+                      ? "Occupied (No Reservation)"
+                      : "In Use"
+                    : "Vacant"}
+                </strong>
+              </span>
+
+              {selectedSeat.activeReservation ? (
+                <>
+                  <span>
+                    Start: <strong className="text-zinc-800">{formatToLocalTime(selectedSeat.activeReservation.start_time)}</strong>
+                  </span>
+                  <span>
+                    End: <strong className="text-zinc-800">{formatToLocalTime(selectedSeat.activeReservation.end_time)}</strong>
+                  </span>
+                  <span className="text-indigo-700 font-semibold flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5" />
+                    Remaining:{" "}
+                    <span className="font-mono bg-white px-2 py-0.5 rounded border border-indigo-200 text-indigo-700 font-bold">
+                      {(() => {
+                        const remainingSec = Math.max(
+                          0,
+                          Math.floor((new Date(selectedSeat.activeReservation.end_time).getTime() - now) / 1000)
+                        );
+                        const hours = Math.floor(remainingSec / 3600);
+                        const mins = Math.floor((remainingSec % 3600) / 60);
+                        const secs = remainingSec % 60;
+                        return `${hours.toString().padStart(2, "0")}h ${mins.toString().padStart(2, "0")}m ${secs.toString().padStart(2, "0")}s`;
+                      })()}
+                    </span>
+                  </span>
+                </>
+              ) : (
+                <span className="text-zinc-500">No active reservation</span>
+              )}
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2.5">
+            {!currentUserId && (
+              <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg flex items-center gap-1">
+                <Lock className="w-3 h-3 text-amber-600" />
+                Login required to reserve
+              </span>
+            )}
+
             {selectedSeat.displayStatus === "Available" && onSelectSeat && (
               <button
                 onClick={() => onSelectSeat(selectedSeat.id)}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-all flex items-center gap-1.5"
               >
-                Reserve Desk {selectedSeat.id}
+                {!currentUserId && <Lock className="w-3.5 h-3.5" />}
+                {currentUserId ? `Reserve Desk ${selectedSeat.id}` : `Sign In to Book Desk ${selectedSeat.id}`}
               </button>
             )}
+
+            {/* User requirement: allow booking even if walk-in occupied */}
+            {selectedSeat.deviceOnline && selectedSeat.is_occupied && !selectedSeat.activeReservation && onSelectSeat && (
+              <button
+                onClick={() => onSelectSeat(selectedSeat.id)}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-all flex items-center gap-1.5"
+                title={currentUserId ? "Claim & reserve this desk" : "Sign in to claim & reserve this desk"}
+              >
+                {!currentUserId && <Lock className="w-3.5 h-3.5" />}
+                {currentUserId ? `Claim & Book Desk ${selectedSeat.id}` : `Sign In to Claim Desk ${selectedSeat.id}`}
+              </button>
+            )}
+
             <button
               onClick={() => setSelectedSeatId(null)}
-              className="px-3 py-2 text-zinc-600 hover:text-zinc-900 text-xs font-medium"
+              className="px-3 py-2 text-zinc-600 hover:text-zinc-900 text-xs font-medium border border-zinc-200 bg-white rounded-xl hover:bg-zinc-50"
             >
               Close
             </button>

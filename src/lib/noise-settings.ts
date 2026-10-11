@@ -59,9 +59,9 @@ export async function updateNoiseSettings(
     updated_at: new Date().toISOString(),
   };
 
-  // Clamp threshold between 35 dB and 100 dB
+  // Clamp threshold between 20 dB and 100 dB
   if (typeof updated.threshold_db === "number") {
-    updated.threshold_db = Math.max(35, Math.min(100, Math.round(updated.threshold_db)));
+    updated.threshold_db = Math.max(20, Math.min(100, Math.round(updated.threshold_db)));
   }
 
   inMemoryCache = updated;

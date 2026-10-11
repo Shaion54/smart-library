@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { getSyncedIso } from "@/lib/time-sync";
+
+export const dynamic = "force-dynamic";
 
 const createReservationSchema = z.object({
   seat_id: z.enum(["S01", "S02", "S03", "S04"]),
@@ -77,7 +80,7 @@ export async function GET(req: NextRequest) {
       .from("reservations")
       .select("id, seat_id, status, start_time, end_time")
       .eq("status", "active")
-      .gt("end_time", new Date().toISOString());
+      .gt("end_time", getSyncedIso());
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -150,7 +153,13 @@ export async function POST(req: NextRequest) {
       {
         success: true,
         message: `Seat ${seat_id} successfully reserved for ${duration_minutes} minutes`,
-        reservation: result,
+        reservation: {
+          id: result.reservation_id,
+          seat_id: result.seat_id,
+          start_time: result.start_time,
+          end_time: result.end_time,
+          status: "active",
+        },
       },
       { status: 201 }
     );

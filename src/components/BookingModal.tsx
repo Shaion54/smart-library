@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from "react";
 import { formatToLocalTime } from "@/lib/seat-utils";
+import { getSyncedNow } from "@/lib/time-sync";
 import { Clock, CheckCircle2, X, AlertCircle, Sparkles } from "lucide-react";
 
 interface BookingModalProps {
@@ -35,8 +36,8 @@ export default function BookingModal({
   const [isCustom, setIsCustom] = useState<boolean>(false);
   const [customInput, setCustomInput] = useState<string>("30");
 
-  // Calculate live expected start and end time
-  const now = new Date();
+  // Calculate live expected start and end time (synced with cloud server time)
+  const now = getSyncedNow();
   const endTime = useMemo(() => {
     return new Date(now.getTime() + duration * 60 * 1000);
   }, [duration]);

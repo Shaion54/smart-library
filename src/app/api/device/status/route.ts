@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { validateDeviceRequest } from "../auth";
+import { getNoiseSettings } from "@/lib/noise-settings";
+import { getSyncedIso } from "@/lib/time-sync";
+
+export const dynamic = "force-dynamic";
 
 const statusSchema = z.object({
   device_id: z.string().min(1).max(50),
@@ -43,52 +47,58 @@ export async function POST(req: NextRequest) {
   try {
     const supabase = createAdminClient();
 
-    // 3. Update device heartbeat and status
-    const nowIso = new Date().toISOString();
-    await supabase.from("devices").upsert(
-      {
-        id: device_id,
-        device_name: "Library Central Telemetry Hub",
-        last_seen: nowIso,
-        is_online: true,
-        ...(firmware_version ? { firmware_version } : {}),
-        ...(ip_address ? { ip_address } : {}),
-      },
-      { onConflict: "id" }
-    );
+    // 3. Update device heartbeat and status, and retrieve current noise warning state
+    const nowIso = getSyncedIso();
+    const { data: updatedDevice } = await supabase
+      .from("devices")
+      .upsert(
+        {
+          id: device_id,
+          device_name: "Library Central Telemetry Hub",
+          last_seen: nowIso,
+          is_online: true,
+          ...(firmware_version ? { firmware_version } : {}),
+          ...(ip_address ? { ip_address } : {}),
+        },
+        { onConflict: "id" }
+      )
+      .select("noise_warning_active")
+      .single();
 
-    // 4. Update physical seat occupancy without affecting maintenance or reservations
-    for (const seatUpdate of seats) {
-      // Get current seat occupancy to update last_occupied_change if it toggled
-      const { data: currentSeat } = await supabase
-        .from("seats")
-        .select("is_occupied")
-        .eq("id", seatUpdate.id)
-        .single();
+    // 4. Update physical seat occupancy only for seats that actually toggled state
+    const { data: allCurrentSeats } = await supabase
+      .from("seats")
+      .select("id, is_occupied");
 
-      const changed = currentSeat && currentSeat.is_occupied !== seatUpdate.is_occupied;
+    const seatMap = new Map((allCurrentSeats || []).map((s) => [s.id, s.is_occupied]));
+    const updatesToRun = seats.filter((s) => seatMap.get(s.id) !== s.is_occupied);
 
-      await supabase
-        .from("seats")
-        .update({
-          is_occupied: seatUpdate.is_occupied,
-          ...(changed ? { last_occupied_change: nowIso } : {}),
-          updated_at: nowIso,
-        })
-        .eq("id", seatUpdate.id);
+    if (updatesToRun.length > 0) {
+      await Promise.all(
+        updatesToRun.map((seatUpdate) =>
+          supabase
+            .from("seats")
+            .update({
+              is_occupied: seatUpdate.is_occupied,
+              last_occupied_change: nowIso,
+              updated_at: nowIso,
+            })
+            .eq("id", seatUpdate.id)
+        )
+      );
     }
 
-    // 5. Trigger database-side stale reservation cleanup
-    try {
-      await supabase.rpc("expire_stale_reservations");
-    } catch (err) {
-      console.warn("Auto-expiry RPC call failed:", err);
-    }
+    // 5. Trigger database-side stale reservation cleanup asynchronously
+    Promise.resolve(supabase.rpc("expire_stale_reservations")).catch(() => {});
+
+    const settings = await getNoiseSettings();
 
     return NextResponse.json({
       success: true,
       message: "Device heartbeat and seat statuses updated",
       timestamp: nowIso,
+      noise_warning_active: Boolean(updatedDevice?.noise_warning_active),
+      noise_threshold_db: settings.threshold_db,
     });
   } catch (error: unknown) {
     console.error("Device status update error:", error);

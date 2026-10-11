@@ -16,10 +16,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="bg-zinc-50/50 text-zinc-900 flex flex-col min-h-screen antialiased selection:bg-blue-600 selection:text-white">
+      <body className="bg-[#F8FAFC] text-zinc-900 flex flex-col min-h-screen antialiased selection:bg-indigo-600 selection:text-white">
         <ToastProvider>
           <Navbar />
-          <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <main className="flex-1 w-full">
             {children}
           </main>
           <footer className="border-t border-zinc-200 bg-white py-6 text-center text-xs text-zinc-500">

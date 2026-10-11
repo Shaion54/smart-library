@@ -16,13 +16,13 @@ export default function StudentReservationBanner({
   onCancelClick,
   isLoading = false,
 }: StudentReservationBannerProps) {
-  const [timeLeft, setTimeLeft] = useState<{ minutes: number; seconds: number; isExpired: boolean }>(() =>
-    getRemainingTime(reservation.end_time)
+  const [timeLeft, setTimeLeft] = useState(() =>
+    getRemainingTime(reservation.end_time, reservation.start_time)
   );
 
   useEffect(() => {
     const timer = setInterval(() => {
-      const remaining = getRemainingTime(reservation.end_time);
+      const remaining = getRemainingTime(reservation.end_time, reservation.start_time);
       setTimeLeft(remaining);
       if (remaining.isExpired) {
         clearInterval(timer);
@@ -30,7 +30,7 @@ export default function StudentReservationBanner({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [reservation.end_time]);
+  }, [reservation.end_time, reservation.start_time]);
 
   return (
     <div className="bg-white border border-blue-200 rounded-xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -57,12 +57,12 @@ export default function StudentReservationBanner({
 
       {/* Right: Countdown & Cancel Action */}
       <div className="flex items-center gap-3 self-end md:self-center">
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-800">
-          <Clock className="w-3.5 h-3.5 text-zinc-500" />
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 border border-indigo-200 rounded-xl text-xs font-mono font-bold text-indigo-700">
+          <Clock className="w-3.5 h-3.5 text-indigo-600" />
           <span>
             {timeLeft.isExpired
               ? "Expired"
-              : `${String(timeLeft.minutes).padStart(2, "0")}:${String(timeLeft.seconds).padStart(2, "0")} remaining`}
+              : `${timeLeft.formatted || `${String(timeLeft.minutes).padStart(2, "0")}m ${String(timeLeft.seconds).padStart(2, "0")}s`} remaining`}
           </span>
         </div>
 

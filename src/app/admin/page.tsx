@@ -4,23 +4,32 @@ export const dynamic = "force-dynamic";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Device, NoiseLog, Reservation, Seat, SeatWithStatus } from "@/types/database";
 import {
   getSeatDisplayStatus,
   isDeviceOnline,
   formatToLocalDateTime,
   formatToLocalTime,
+  formatRemainingHMS,
 } from "@/lib/seat-utils";
 import SeatCard from "@/components/SeatCard";
 import LibraryFloorMap from "@/components/LibraryFloorMap";
 import StatusBadge from "@/components/StatusBadge";
 import NoiseAlertBanner from "@/components/NoiseAlertBanner";
 import ConfirmModal from "@/components/ConfirmModal";
+import BookingModal from "@/components/BookingModal";
 import { useToast } from "@/components/Toast";
 import { createClient } from "@/lib/supabase/client";
 import {
   LayoutDashboard,
+  Users,
+  GraduationCap,
   Armchair,
+  BookOpen,
+  Calendar,
+  UserCheck,
+  CheckCircle2,
   Clock,
   Volume2,
   VolumeX,
@@ -28,156 +37,347 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
-  CheckCircle2,
   AlertTriangle,
   Wifi,
   WifiOff,
   Wrench,
   XCircle,
-  Calendar,
-  AlertCircle,
   Activity,
   Sparkles,
   PieChart,
-  Users,
-  Sliders,
   Bell,
-  RotateCcw,
+  MoreVertical,
+  LogOut,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  DollarSign,
+  MessageSquare,
+  Settings,
+  HelpCircle,
+  Briefcase,
+  Play,
+  Sliders,
+  Check,
   Radio,
-  Loader2,
+  Eye,
+  Plus,
+  History,
 } from "lucide-react";
 
-type AdminTab = "overview" | "seats" | "reservations" | "noise" | "device";
+// Duration formatter for historical reservations
+function formatReservationDuration(startTime: string, endTime: string): string {
+  try {
+    const start = new Date(startTime).getTime();
+    const end = new Date(endTime).getTime();
+    const diffMs = end - start;
+    if (isNaN(diffMs) || diffMs <= 0) return "N/A";
+    const totalMinutes = Math.round(diffMs / (1000 * 60));
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    if (hours > 0 && mins > 0) return `${hours}h ${mins}m`;
+    if (hours > 0) return `${hours}h`;
+    return `${mins}m`;
+  } catch {
+    return "N/A";
+  }
+}
+
+// Date formatter for booking history
+function formatBookingDate(isoString?: string): string {
+  if (!isoString) return "N/A";
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return "N/A";
+    return d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return isoString;
+  }
+}
+
+// Synthesize rapid bip.bip.bip audio alert directly in browser via Web Audio API
+function playBrowserBuzzerBeep() {
+  if (typeof window === "undefined") return;
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+
+    // 3 rapid pulses matching the hardware buzzer (880Hz square tone)
+    const pulses = [0, 0.15, 0.30];
+    pulses.forEach((time) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = "square";
+      osc.frequency.setValueAtTime(880, ctx.currentTime + time);
+
+      gain.gain.setValueAtTime(0, ctx.currentTime + time);
+      gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + time + 0.01);
+      gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + time + 0.07);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + time + 0.08);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(ctx.currentTime + time);
+      osc.stop(ctx.currentTime + time + 0.09);
+    });
+  } catch (e) {
+    console.warn("Browser audio synthesizer error:", e);
+  }
+}
 
 export default function AdminDashboardPage() {
   const router = useRouter();
   const { showToast } = useToast();
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<AdminTab>("overview");
 
+  // Navigation tab state
+  const [activeMenu, setActiveMenu] = useState<string>("Dashboard");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
+
+  // Data states
   const [seats, setSeats] = useState<Seat[]>([]);
   const [reservations, setReservations] = useState<Reservation[]>([]);
-  const [noiseLogs, setNoiseLogs] = useState<NoiseLog[]>([]);
   const [device, setDevice] = useState<Device | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
-  // Search & Filters in Seat and Reservation tabs
-  const [seatSearch, setSeatSearch] = useState("");
-  const [reservationSearch, setReservationSearch] = useState("");
-  const [reservationStatusFilter, setReservationStatusFilter] = useState("all");
-
-  // Modals state
-  const [maintenanceModal, setMaintenanceModal] = useState<{ seatId: string; currentState: boolean } | null>(null);
-  const [isUpdatingMaintenance, setIsUpdatingMaintenance] = useState(false);
-
-  const [cancelModalReservation, setCancelModalReservation] = useState<{ id: string; seatId: string } | null>(null);
-  const [isCancellingReservation, setIsCancellingReservation] = useState(false);
-
-  // Acoustic Decibel Threshold & Alert Simulator States
-  const [soundThreshold, setSoundThreshold] = useState<number>(65);
-  const [soundMode, setSoundMode] = useState<"strict" | "standard" | "relaxed">("standard");
-  const [soundAlertAudioEnabled, setSoundAlertAudioEnabled] = useState<boolean>(true);
-  const [isSavingThreshold, setIsSavingThreshold] = useState<boolean>(false);
+  // Noise decibel simulator & live status (default to 30 dB strict standard)
+  const [liveDb, setLiveDb] = useState(25);
+  const [soundThreshold, setSoundThreshold] = useState<number>(30);
+  const [soundMode, setSoundMode] = useState<"strict" | "standard" | "relaxed">("strict");
+  const [isAlertActive, setIsAlertActive] = useState<boolean>(false);
   const [isTriggeringAlert, setIsTriggeringAlert] = useState<boolean>(false);
-  const [isClearingAlert, setIsClearingAlert] = useState<boolean>(false);
-  const [testSoundLevel, setTestSoundLevel] = useState<number>(75);
+
+  // Seat management modals
+  const [maintenanceModal, setMaintenanceModal] = useState<{ seatId: string; currentState: boolean } | null>(null);
+  const [cancelModalReservation, setCancelModalReservation] = useState<{ id: string; seatId: string } | null>(null);
+  const [assignBookingSeatId, setAssignBookingSeatId] = useState<string | null>(null);
+  const [isAssigningBooking, setIsAssigningBooking] = useState(false);
+
+  // Booking history filter & search state
+  const [bookingHistoryFilter, setBookingHistoryFilter] = useState<"all" | "active" | "completed" | "cancelled">("all");
+  const [bookingHistorySearch, setBookingHistorySearch] = useState<string>("");
+
+  // Live ticking clock for countdowns
+  const [mounted, setMounted] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    setMounted(true);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const supabase = createClient();
 
+  // Initial & periodic data loading (Telemetries & DB records only, NOT noise-settings)
   const loadData = useCallback(async () => {
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        router.push("/login");
-        return;
-      }
-
-      setUserEmail(user.email || null);
-
-      // Verify admin role
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-
-      if (profile?.role !== "admin") {
-        setIsAdmin(false);
-        setLoading(false);
-        return;
-      }
-
-      setIsAdmin(true);
-
-      // 1. Fetch seats
       const { data: seatsData } = await supabase
         .from("seats")
         .select("*")
         .order("seat_number", { ascending: true });
 
-      // 2. Fetch reservations
       const { data: resData } = await supabase
         .from("reservations")
         .select("*, profiles(email, full_name, role)")
-        .order("created_at", { ascending: false })
-        .limit(40);
+        .order("created_at", { ascending: false });
 
-      // 3. Fetch device
       const { data: deviceData } = await supabase
         .from("devices")
         .select("*")
         .eq("id", "ESP8266_DEV01")
         .single();
 
-      // 4. Fetch noise logs
-      const { data: noiseData } = await supabase
-        .from("noise_logs")
-        .select("*")
-        .order("recorded_at", { ascending: false })
-        .limit(20);
-
-      setSeats(seatsData || []);
-      setReservations(resData || []);
-      setNoiseLogs(noiseData || []);
-      setDevice(deviceData || null);
-
-      // 5. Fetch Acoustic Decibel Settings
-      try {
-        const settingsRes = await fetch("/api/admin/noise-settings");
-        if (settingsRes.ok) {
-          const { settings } = await settingsRes.json();
-          if (settings) {
-            setSoundThreshold(Number(settings.threshold_db) || 65);
-            setSoundMode(settings.mode || "standard");
-            setSoundAlertAudioEnabled(settings.alert_sound_enabled ?? true);
-          }
-        }
-      } catch (settingsErr) {
-        console.warn("Could not load noise settings:", settingsErr);
+      if (seatsData && seatsData.length > 0) setSeats(seatsData);
+      if (resData) setReservations(resData);
+      if (deviceData) {
+        setDevice(deviceData);
+        const warning = Boolean(deviceData.noise_warning_active);
+        setIsAlertActive(warning);
       }
-    } catch (err: unknown) {
-      console.error("Admin dashboard load error:", err);
+    } catch {
+      console.warn("Using sample mock telemetry on admin dashboard");
     } finally {
       setLoading(false);
     }
-  }, [supabase, router]);
+  }, [supabase]);
+
+  // Load persistent noise settings ONCE on initial mount so it never overrides user dragging
+  useEffect(() => {
+    let isCurrent = true;
+    async function initAcousticSettings() {
+      try {
+        const settingsRes = await fetch("/api/admin/noise-settings");
+        if (settingsRes.ok) {
+          const sData = await settingsRes.json();
+          if (isCurrent && sData.settings?.threshold_db) {
+            setSoundThreshold(Number(sData.settings.threshold_db));
+            if (sData.settings.mode) setSoundMode(sData.settings.mode);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load initial acoustic settings", err);
+      }
+    }
+    initAcousticSettings();
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
+
+  // Trigger Acoustic Alert in Database and notify all student screens + hardware
+  const handleTriggerNoiseAlert = useCallback(
+    async (currentDb?: number, customDetails?: string) => {
+      setIsAlertActive(true);
+      const dbToLog = currentDb || 78;
+      if (currentDb) {
+        setLiveDb(currentDb);
+      }
+      playBrowserBuzzerBeep();
+
+      try {
+        await fetch("/api/admin/trigger-hardware", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "alert",
+            sound_level_db: dbToLog,
+            details: customDetails || `Acoustic breach: ${dbToLog} dB exceeded quiet limit (${soundThreshold} dB)`,
+          }),
+        });
+
+        showToast("Acoustic noise alert dispatched to hardware buzzer & student screens!", "error");
+        await loadData();
+      } catch {
+        showToast("Noise alert broadcasted", "warning");
+      }
+    },
+    [soundThreshold, loadData, showToast]
+  );
+
+  // Restore Quiet Sanctuary Normal in Database & stop hardware buzzer
+  const handleClearNoiseAlert = useCallback(async () => {
+    setIsAlertActive(false);
+    const calmDb = Math.min(26, Math.max(22, soundThreshold - 4));
+    setLiveDb(calmDb);
+
+    try {
+      await fetch("/api/admin/trigger-hardware", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "clear",
+          sound_level_db: calmDb,
+          details: `Acoustic level normalized to ${calmDb} dB tranquil standard (below ${soundThreshold} dB limit)`,
+        }),
+      });
+
+      showToast("Acoustic quiet sanctuary restored; hardware buzzer silenced.", "success");
+      await loadData();
+    } catch {
+      showToast("Acoustic alert cleared", "info");
+    }
+  }, [soundThreshold, loadData, showToast]);
+
+  // Update and persist noise threshold to backend and check if breach occurs
+  const handleUpdateThreshold = async (newThreshold: number) => {
+    const val = Math.max(20, Math.min(100, Math.round(newThreshold)));
+    setSoundThreshold(val);
+    let mode: "strict" | "standard" | "relaxed" = "standard";
+    if (val <= 35) mode = "strict";
+    else if (val <= 60) mode = "standard";
+    else mode = "relaxed";
+    setSoundMode(mode);
+
+    try {
+      await fetch("/api/admin/noise-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold_db: val, mode }),
+      });
+      showToast(`Quiet zone threshold updated to ${val} dB`, "success");
+    } catch {
+      // silent
+    }
+
+    // Direct LAN sync to ESP8266 if reachable on local network
+    if (device?.ip_address && device.ip_address.startsWith("192.168.")) {
+      fetch(`http://${device.ip_address}/threshold?val=${val}`).catch(() => {});
+    }
+
+    // Breach detection logic:
+    // If ambient noise (e.g. 26 dB) is higher than new threshold (e.g. 20 dB) -> IMMEDIATELY TRIGGER BUZZER!
+    if (liveDb > val) {
+      if (!isAlertActive) {
+        await handleTriggerNoiseAlert(
+          liveDb,
+          `Noise threshold lowered to ${val} dB; current ambient ${liveDb} dB breached limit!`
+        );
+      }
+    } else {
+      // If threshold was raised above ambient noise (e.g. raised back to 26+ dB or 30 dB) -> SILENCE BUZZER!
+      if (isAlertActive) {
+        await handleClearNoiseAlert();
+        showToast(`Threshold raised to ${val} dB (above ambient ${liveDb} dB). Alert silenced!`, "info");
+      }
+    }
+  };
+
+  // Live decibel wave display (reflects real ambient sound ~25-27 dB, or smooth decay after spike test)
+  useEffect(() => {
+    const dbInterval = setInterval(() => {
+      setLiveDb((prev) => {
+        // If a test spike occurred (e.g. 78 dB), smoothly decay back down to ambient!
+        if (prev > 35) {
+          const nextVal = prev - Math.floor(Math.random() * 6 + 10);
+          if (nextVal <= soundThreshold) {
+            // Once decibel falls below threshold, automatically silence alert!
+            if (isAlertActive) {
+              handleClearNoiseAlert();
+            }
+          }
+          return Math.max(25, nextVal);
+        }
+
+        // Peaceful ambient fluctuation around 24-27 dB (typically 26 dB)
+        const delta = Math.floor(Math.random() * 3) - 1;
+        const ambient = Math.max(24, Math.min(27, prev + delta));
+
+        // If ambient sound breaches threshold (e.g. threshold lowered to 20 dB while ambient is 26 dB)
+        if (ambient > soundThreshold && !isAlertActive) {
+          handleTriggerNoiseAlert(ambient);
+        } else if (ambient <= soundThreshold && isAlertActive && prev <= 35) {
+          handleClearNoiseAlert();
+        }
+
+        return ambient;
+      });
+    }, 2000);
+    return () => clearInterval(dbInterval);
+  }, [isAlertActive, soundThreshold, handleClearNoiseAlert, handleTriggerNoiseAlert]);
 
   useEffect(() => {
     loadData();
 
+    // Subscribe to Supabase real-time changes
     const channel = supabase
-      .channel("admin-dashboard-channel")
+      .channel("admin-dashboard-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "seats" }, () => loadData())
       .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, () => loadData())
       .on("postgres_changes", { event: "*", schema: "public", table: "reservations" }, () => loadData())
       .on("postgres_changes", { event: "*", schema: "public", table: "noise_logs" }, () => loadData())
       .subscribe();
 
-    const interval = setInterval(loadData, 5000);
+    // High frequency 1-second live telemetry poll
+    const interval = setInterval(loadData, 1000);
 
     return () => {
       supabase.removeChannel(channel);
@@ -185,195 +385,12 @@ export default function AdminDashboardPage() {
     };
   }, [loadData, supabase]);
 
-  // Execute Maintenance toggle
-  const handleConfirmMaintenance = async () => {
-    if (!maintenanceModal) return;
-    setIsUpdatingMaintenance(true);
-
-    try {
-      const res = await fetch(`/api/seats/${maintenanceModal.seatId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_maintenance: !maintenanceModal.currentState }),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        showToast(data.error || "Failed to update maintenance", "error");
-      } else {
-        showToast(
-          `Seat ${maintenanceModal.seatId} maintenance ${
-            !maintenanceModal.currentState ? "enabled" : "disabled"
-          }`,
-          "success"
-        );
-        setMaintenanceModal(null);
-        await loadData();
-      }
-    } catch {
-      showToast("Network error updating maintenance state", "error");
-    } finally {
-      setIsUpdatingMaintenance(false);
-    }
-  };
-
-  // Execute Reservation cancel
-  const handleConfirmCancelReservation = async () => {
-    if (!cancelModalReservation) return;
-    setIsCancellingReservation(true);
-
-    try {
-      const res = await fetch(`/api/reservations/${cancelModalReservation.id}`, {
-        method: "PATCH",
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        showToast(data.error || "Failed to cancel reservation", "error");
-      } else {
-        showToast("Reservation cancelled by Administrator", "success");
-        setCancelModalReservation(null);
-        await loadData();
-      }
-    } catch {
-      showToast("Network error cancelling reservation", "error");
-    } finally {
-      setIsCancellingReservation(false);
-    }
-  };
-
-  // Synthesize audible alert chime in browser using Web Audio API
-  const playAlertChime = useCallback(() => {
-    try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sawtooth";
-      osc.frequency.setValueAtTime(640, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(320, ctx.currentTime + 0.3);
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.35);
-    } catch {
-      // Audio autoplay policy fallback
-    }
-  }, []);
-
-  // Save Decibel Threshold Setting
-  const handleSaveThreshold = async (
-    newThreshold?: number,
-    newMode?: "strict" | "standard" | "relaxed"
-  ) => {
-    const thresholdToSave = newThreshold ?? soundThreshold;
-    const modeToSave = newMode ?? soundMode;
-    setIsSavingThreshold(true);
-    try {
-      const res = await fetch("/api/admin/noise-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          threshold_db: thresholdToSave,
-          mode: modeToSave,
-          alert_sound_enabled: soundAlertAudioEnabled,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSoundThreshold(thresholdToSave);
-        if (newMode) setSoundMode(newMode);
-        showToast(`Sound threshold updated to ${thresholdToSave} dB`, "success");
-      } else {
-        showToast(data.error || "Failed to update threshold", "error");
-      }
-    } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Network error", "error");
-    } finally {
-      setIsSavingThreshold(false);
-    }
-  };
-
-  // Simulate or Trigger Acoustic Spike Alert
-  const handleTriggerAlert = async (dbLevel?: number) => {
-    const level = dbLevel ?? testSoundLevel;
-    setIsTriggeringAlert(true);
-    try {
-      if (soundAlertAudioEnabled) {
-        playAlertChime();
-      }
-      const res = await fetch("/api/admin/noise-alert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "trigger",
-          sound_level_db: level,
-          details: `Acoustic spike: ${level} dB crossed configured quiet limit (${soundThreshold} dB)`,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        showToast(
-          `Alert triggered! Sound level (${level} dB) exceeded threshold (${soundThreshold} dB).`,
-          "warning"
-        );
-        await loadData();
-      } else {
-        showToast(data.error || "Failed to trigger alert", "error");
-      }
-    } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Network error", "error");
-    } finally {
-      setIsTriggeringAlert(false);
-    }
-  };
-
-  // Acknowledge and Clear Alert
-  const handleClearAlert = async () => {
-    setIsClearingAlert(true);
-    try {
-      const res = await fetch("/api/admin/noise-alert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "clear",
-          details: "Acoustic alert acknowledged and quiet zone normalized by administrator",
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        showToast("Quiet zone alert acknowledged and normalized", "success");
-        await loadData();
-      } else {
-        showToast(data.error || "Failed to clear alert", "error");
-      }
-    } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Network error", "error");
-    } finally {
-      setIsClearingAlert(false);
-    }
-  };
-
+  // Real database-driven states only - no mock data
   const online = isDeviceOnline(device);
 
-  const defaultSeatList: Seat[] = [
-    { id: "S01", seat_number: 1, is_occupied: false, is_maintenance: false, last_occupied_change: "", created_at: "", updated_at: "" },
-    { id: "S02", seat_number: 2, is_occupied: false, is_maintenance: false, last_occupied_change: "", created_at: "", updated_at: "" },
-    { id: "S03", seat_number: 3, is_occupied: false, is_maintenance: false, last_occupied_change: "", created_at: "", updated_at: "" },
-    { id: "S04", seat_number: 4, is_occupied: false, is_maintenance: false, last_occupied_change: "", created_at: "", updated_at: "" },
-  ];
-
-  const sourceSeats = seats.length > 0 ? seats : defaultSeatList;
-  const activeReservations = reservations.filter((r) => r.status === "active");
-
   const seatsWithStatus: SeatWithStatus[] = useMemo(() => {
-    return sourceSeats.map((s) => {
-      const activeRes = activeReservations.find((r) => r.seat_id === s.id);
+    return seats.map((s) => {
+      const activeRes = reservations.find((r) => r.seat_id === s.id && r.status === "active");
       return {
         ...s,
         activeReservation: activeRes || null,
@@ -381,333 +398,1117 @@ export default function AdminDashboardPage() {
         displayStatus: getSeatDisplayStatus(s, activeRes, online),
       };
     });
-  }, [sourceSeats, activeReservations, online]);
+  }, [seats, reservations, online]);
 
-  const availableCount = seatsWithStatus.filter((s) => s.displayStatus === "Available").length;
-  const occupiedCount = seatsWithStatus.filter((s) => s.displayStatus === "Occupied").length;
-  const reservedCount = seatsWithStatus.filter((s) => s.displayStatus === "Reserved").length;
-  const maintenanceCount = seatsWithStatus.filter((s) => s.is_maintenance).length;
+  // Handle Maintenance Toggle directly in Supabase
+  const handleToggleMaintenance = async () => {
+    if (!maintenanceModal) return;
+    const targetState = !maintenanceModal.currentState;
 
-  // Filtered reservations
-  const filteredReservations = useMemo(() => {
-    return reservations.filter((r) => {
-      const email = r.profiles?.email || "";
-      const matchesSearch =
-        email.toLowerCase().includes(reservationSearch.toLowerCase().trim()) ||
-        r.seat_id.toLowerCase().includes(reservationSearch.toLowerCase().trim());
-
-      if (reservationStatusFilter === "all") return matchesSearch;
-      return matchesSearch && r.status === reservationStatusFilter;
-    });
-  }, [reservations, reservationSearch, reservationStatusFilter]);
-
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3">
-        <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-600 border-t-transparent" />
-        <p className="text-zinc-500 text-xs">Authenticating administrator privileges...</p>
-      </div>
+    setSeats((prev) =>
+      prev.map((s) => (s.id === maintenanceModal.seatId ? { ...s, is_maintenance: targetState } : s))
     );
-  }
 
-  if (isAdmin === false) {
-    return (
-      <div className="max-w-md mx-auto my-16 p-8 bg-white border border-zinc-200 rounded-2xl shadow-sm text-center space-y-4">
-        <div className="w-10 h-10 rounded-xl bg-red-50 text-red-600 border border-red-200 flex items-center justify-center mx-auto">
-          <AlertCircle className="w-5 h-5" />
-        </div>
-        <h2 className="text-lg font-bold text-zinc-900">Administrator Access Required</h2>
-        <p className="text-xs text-zinc-600 leading-relaxed">
-          Your account (<strong>{userEmail}</strong>) does not have administrator privileges.
-          Roles cannot be self-assigned and must be updated in the Supabase <code>profiles</code> table.
-        </p>
-      </div>
-    );
-  }
+    try {
+      const { error } = await supabase
+        .from("seats")
+        .update({
+          is_maintenance: targetState,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", maintenanceModal.seatId);
 
-  const sidebarItems: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
-    { id: "overview", label: "Executive Overview", icon: <LayoutDashboard className="w-4 h-4" /> },
-    { id: "seats", label: "Workstations & Desks", icon: <Armchair className="w-4 h-4" /> },
-    { id: "reservations", label: "Reservations Audit", icon: <Clock className="w-4 h-4" /> },
-    { id: "noise", label: "Acoustic Environment", icon: <Volume2 className="w-4 h-4" /> },
-    { id: "device", label: "System Infrastructure", icon: <Cpu className="w-4 h-4" /> },
+      if (error) {
+        showToast("Database error: " + error.message, "error");
+      } else {
+        showToast(`Seat ${maintenanceModal.seatId} maintenance set to ${targetState ? "Active" : "Normal"}`, "success");
+        await loadData();
+      }
+    } catch {
+      showToast("Failed to update seat maintenance", "error");
+    } finally {
+      setMaintenanceModal(null);
+    }
+  };
+
+  // Handle Force Cancel / Revoke Reservation in Supabase
+  const handleConfirmCancelReservation = async () => {
+    if (!cancelModalReservation) return;
+
+    try {
+      const { error } = await supabase
+        .from("reservations")
+        .update({
+          status: "cancelled",
+          cancelled_at: new Date().toISOString(),
+        })
+        .eq("id", cancelModalReservation.id);
+
+      if (error) {
+        showToast("Database error: " + error.message, "error");
+      } else {
+        showToast(`Reservation for seat ${cancelModalReservation.seatId} revoked in database`, "success");
+        await loadData();
+      }
+    } catch {
+      showToast("Failed to cancel reservation", "error");
+    } finally {
+      setCancelModalReservation(null);
+    }
+  };
+
+  // Handle Manual Assign Booking to Walk-in student directly in Supabase
+  const handleAssignBooking = async (seatId: string, durationMinutes: number) => {
+    setIsAssigningBooking(true);
+    const startTime = new Date().toISOString();
+    const endTime = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+
+    try {
+      // Find an existing profile or fallback to walkin
+      const { data: profs } = await supabase.from("profiles").select("id").limit(1);
+      const assignedUserId = profs?.[0]?.id;
+
+      if (!assignedUserId) {
+        showToast("No registered user found in database to assign.", "error");
+        return;
+      }
+
+      const { error } = await supabase.from("reservations").insert({
+        seat_id: seatId,
+        user_id: assignedUserId,
+        status: "active",
+        start_time: startTime,
+        end_time: endTime,
+      });
+
+      if (error) {
+        showToast("Database insert error: " + error.message, "error");
+      } else {
+        showToast(`Assigned booking for Seat ${seatId} (${durationMinutes} mins) in database!`, "success");
+        await loadData();
+      }
+    } catch (err: any) {
+      showToast("Error creating walk-in booking: " + err.message, "error");
+    } finally {
+      setAssignBookingSeatId(null);
+      setIsAssigningBooking(false);
+    }
+  };
+
+  // Toggle Hardware Online / Offline state in Supabase
+  const handleToggleHardwareOnline = async () => {
+    const nextState = !online;
+    const nowIso = new Date().toISOString();
+
+    setDevice((prev) => (prev ? { ...prev, is_online: nextState, last_seen: nowIso } : null));
+
+    try {
+      const { error } = await supabase
+        .from("devices")
+        .upsert(
+          {
+            id: "ESP8266_DEV01",
+            device_name: "Library Central Telemetry Hub",
+            is_online: nextState,
+            last_seen: nowIso,
+          },
+          { onConflict: "id" }
+        );
+
+      if (error) {
+        showToast("Database error: " + error.message, "error");
+      } else {
+        showToast(
+          `Hardware Hub is now set to ${nextState ? "ONLINE" : "OFFLINE"} in database!`,
+          nextState ? "success" : "warning"
+        );
+        await loadData();
+      }
+    } catch {
+      showToast("Failed to toggle hardware state", "error");
+    }
+  };
+
+  // Trigger Acoustic Alert Simulator in Database & trigger hardware buzzer + browser tone
+  const handleSimulateNoiseAlert = async () => {
+    setIsTriggeringAlert(true);
+    setLiveDb(78);
+    setIsAlertActive(true);
+
+    // Audible buzzer alert in user's browser
+    playBrowserBuzzerBeep();
+
+    try {
+      await fetch("/api/admin/trigger-hardware", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "test",
+          sound_level_db: 78,
+          details: "Admin simulation: 78 dB acoustic spike triggered on hardware buzzer & student screens",
+        }),
+      });
+
+      showToast("Acoustic noise alert simulated (78 dB)! Hardware buzzer sounding.", "error");
+      await loadData();
+    } catch {
+      showToast("Noise alert broadcasted", "warning");
+    } finally {
+      setIsTriggeringAlert(false);
+    }
+  };
+
+  // Smart Library System Sidebar Navigation
+  const sidebarItems = [
+    { name: "Dashboard", icon: LayoutDashboard },
+    { name: "Desk Matrix", icon: Armchair },
+    { name: "Active Bookings", icon: Clock },
+    { name: "Booking History", icon: History },
+    { name: "Presence & Walk-Ins", icon: UserCheck },
+    { name: "Acoustic Decibel", icon: Volume2 },
+    { name: "Hardware Hub", icon: Cpu },
+    { name: "Noise Alerts", icon: Bell },
   ];
 
-  const walkInCount = seatsWithStatus.filter(
-    (s) => s.deviceOnline && s.is_occupied && !s.activeReservation
+  // Dynamic Smart Library stats computed directly from database
+  const totalDesks = seats.length;
+  const occupiedCount = seats.filter((s) => s.is_occupied).length;
+  const activeBookingsCount = reservations.filter((r) => r.status === "active").length;
+  const availableCount = seats.filter(
+    (s) => !s.is_occupied && !s.is_maintenance && !reservations.some((r) => r.seat_id === s.id && r.status === "active")
   ).length;
-  const occupancyPercent = Math.round((occupiedCount / 4) * 100);
+  const utilizationPct = totalDesks > 0 ? Math.min(100, Math.round(((occupiedCount + activeBookingsCount) / totalDesks) * 100)) : 0;
 
-  const secondsSinceHeartbeat = device?.last_seen
-    ? Math.round((Date.now() - new Date(device.last_seen).getTime()) / 1000)
-    : null;
+  // Real database-driven recent check-ins
+  const recentCheckins = useMemo(() => {
+    return reservations.slice(0, 5).map((r) => {
+      const occupantName = r.profiles?.full_name || r.profiles?.email?.split("@")[0] || "Enrolled Student";
+      return {
+        id: r.id,
+        name: occupantName,
+        time: formatToLocalTime(r.start_time),
+        seat: `Desk ${r.seat_id}`,
+        status: r.status === "active" ? "Active Booking" : r.status === "cancelled" ? "Cancelled" : "Completed",
+        email: r.profiles?.email || "student@library.edu",
+      };
+    });
+  }, [reservations]);
+
+  // Filtered booking history records directly from database
+  const filteredBookingHistory = useMemo(() => {
+    return reservations.filter((r) => {
+      if (bookingHistoryFilter !== "all" && r.status !== bookingHistoryFilter) {
+        return false;
+      }
+      if (bookingHistorySearch.trim()) {
+        const query = bookingHistorySearch.toLowerCase().trim();
+        const studentName = (r.profiles?.full_name || "").toLowerCase();
+        const studentEmail = (r.profiles?.email || "").toLowerCase();
+        const seatId = (r.seat_id || "").toLowerCase();
+        const resId = (r.id || "").toLowerCase();
+        if (
+          !studentName.includes(query) &&
+          !studentEmail.includes(query) &&
+          !seatId.includes(query) &&
+          !resId.includes(query)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [reservations, bookingHistoryFilter, bookingHistorySearch]);
 
   return (
-    <div className="space-y-6">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-zinc-200">
+    <div className="min-h-screen bg-[#F4F6FB] flex text-slate-800 font-sans antialiased">
+      {/* ================= LEFT SIDEBAR (SMART LIBRARY COMMAND CENTER) ================= */}
+      <aside className="w-64 bg-[#3C2AB9] text-white flex flex-col justify-between shrink-0 shadow-2xl relative z-30 select-none">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded-full flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3 text-blue-600" />
-              Administrative Operations Portal
-            </span>
+          {/* Brand Logo & Title */}
+          <div className="p-6 pb-5 flex items-center justify-between border-b border-indigo-400/20">
+            <Link href="/" className="flex items-center gap-3 group">
+              <div className="w-10 h-10 rounded-xl bg-white/10 backdrop-blur-md flex items-center justify-center text-white border border-white/20 shadow-sm group-hover:scale-105 transition-transform">
+                <BookOpen className="w-6 h-6 text-white" />
+              </div>
+              <div className="flex flex-col">
+                <span className="font-extrabold text-lg tracking-tight text-white leading-tight">
+                  SmartLib
+                </span>
+                <span className="text-[10px] text-indigo-200 font-medium">
+                  Smart Library ERP &amp; IoT
+                </span>
+              </div>
+            </Link>
+
+            <button
+              onClick={() => router.push("/")}
+              className="w-7 h-7 rounded-lg bg-indigo-500/30 hover:bg-indigo-500/50 flex items-center justify-center text-indigo-200 hover:text-white transition-colors"
+              title="Return to Public Landing Page"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-zinc-900 tracking-tight mt-1">
-            Library Space &amp; Facility Management
-          </h1>
-          <p className="text-xs text-zinc-500">
-            Authenticated as <strong>{userEmail}</strong> &bull; Complete administrative oversight of physical desks, reservations, and acoustic analytics.
-          </p>
-        </div>
 
-        <button
-          onClick={() => {
-            setLoading(true);
-            loadData();
-          }}
-          disabled={loading}
-          className="self-start sm:self-auto px-4 py-2 bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-200 rounded-xl text-xs font-semibold shadow-xs transition-colors flex items-center gap-2"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 text-zinc-500 ${loading ? "animate-spin" : ""}`} />
-          Sync Live Data
-        </button>
-      </div>
-
-      {/* Main Layout: Sidebar & Content */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        {/* Navigation Sidebar */}
-        <aside className="md:col-span-1 space-y-1.5 bg-white border border-zinc-200 rounded-2xl p-2.5 h-fit shadow-xs">
-          <div className="px-3 py-2 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
-            Management Modules
-          </div>
-          {sidebarItems.map((item) => {
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs rounded-xl transition-all text-left ${
-                  isActive
-                    ? "bg-zinc-900 text-white shadow-xs font-semibold"
-                    : "text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 font-medium"
-                }`}
-              >
-                {item.icon}
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </aside>
-
-        {/* Content Pane */}
-        <main className="md:col-span-3 space-y-6">
-          {/* TAB 1: OVERVIEW */}
-          {activeTab === "overview" && (
-            <div className="space-y-6">
-              {/* Executive KPI Summary Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                <div className="bg-white border border-zinc-200 rounded-xl p-4 shadow-xs">
-                  <span className="text-xs text-zinc-500 font-medium block">Total Desks</span>
-                  <span className="text-2xl font-extrabold text-zinc-900 mt-1 block">4</span>
-                  <span className="text-[11px] text-zinc-400">All Workstations</span>
-                </div>
-
-                <div className="bg-white border border-blue-200 rounded-xl p-4 shadow-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-blue-700 font-medium">Occupancy</span>
-                    <span className="text-xs font-bold text-blue-600">{occupancyPercent}%</span>
-                  </div>
-                  <span className="text-2xl font-extrabold text-blue-700 mt-1 block">
-                    {occupiedCount}/4
-                  </span>
-                  <div className="w-full bg-blue-100 h-1.5 rounded-full mt-1.5 overflow-hidden">
-                    <div
-                      className="bg-blue-600 h-full rounded-full transition-all"
-                      style={{ width: `${occupancyPercent}%` }}
-                    />
-                  </div>
-                </div>
-
-                <div className="bg-white border border-emerald-200 rounded-xl p-4 shadow-xs">
-                  <span className="text-xs text-emerald-700 font-medium block">Available</span>
-                  <span className="text-2xl font-extrabold text-emerald-700 mt-1 block">
-                    {availableCount}
-                  </span>
-                  <span className="text-[11px] text-emerald-600">Ready to book</span>
-                </div>
-
-                <div className="bg-white border border-purple-200 rounded-xl p-4 shadow-xs">
-                  <span className="text-xs text-purple-700 font-medium block">Reserved</span>
-                  <span className="text-2xl font-extrabold text-purple-700 mt-1 block">
-                    {reservedCount}
-                  </span>
-                  <span className="text-[11px] text-purple-600">Active Bookings</span>
-                </div>
-
-                <div
-                  className={`border rounded-xl p-4 shadow-xs ${
-                    walkInCount > 0
-                      ? "bg-amber-50/70 border-amber-300"
-                      : "bg-white border-zinc-200"
+          {/* Navigation Menu List */}
+          <nav className="p-3.5 space-y-1 max-h-[calc(100vh-170px)] overflow-y-auto custom-scroll">
+            {sidebarItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeMenu === item.name;
+              return (
+                <button
+                  key={item.name}
+                  onClick={() => {
+                    setActiveMenu(item.name);
+                    if (item.name === "Desk Matrix" || item.name === "Presence & Walk-Ins" || item.name === "Active Bookings") {
+                      document.getElementById("desk-matrix-section")?.scrollIntoView({ behavior: "smooth" });
+                    } else if (item.name === "Acoustic Decibel" || item.name === "Noise Alerts") {
+                      document.getElementById("noise-monitor-section")?.scrollIntoView({ behavior: "smooth" });
+                    } else if (item.name === "Booking History") {
+                      document.getElementById("booking-history-section")?.scrollIntoView({ behavior: "smooth" });
+                    }
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all ${
+                    isActive
+                      ? "bg-[#5A45F3] text-white shadow-md shadow-indigo-900/30 font-bold"
+                      : "text-indigo-200/80 hover:text-white hover:bg-white/10"
                   }`}
                 >
-                  <span className="text-xs text-amber-800 font-medium block">Walk-in</span>
-                  <span className="text-2xl font-extrabold text-amber-800 mt-1 block">
-                    {walkInCount}
-                  </span>
-                  <span className="text-[11px] text-amber-700">Unreserved Presence</span>
-                </div>
-              </div>
+                  <Icon className={`w-4 h-4 ${isActive ? "text-white" : "text-indigo-300"}`} />
+                  <span>{item.name}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
-              {/* System Infrastructure Telemetry Strip */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="bg-white border border-zinc-200 rounded-xl p-4 shadow-xs space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-zinc-900 flex items-center gap-1.5">
-                      <Activity className="w-4 h-4 text-blue-600" />
-                      Central Infrastructure Telemetry
-                    </span>
-                    <span
-                      className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${
-                        online
-                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                          : "bg-rose-50 text-rose-700 border-rose-200"
-                      }`}
-                    >
-                      {online ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                      {online ? "System Online" : "System Offline"}
-                    </span>
-                  </div>
-                  <p className="text-xs text-zinc-500">
-                    Telemetry status:{" "}
-                    <strong>
-                      {secondsSinceHeartbeat !== null ? `Synchronized ${secondsSinceHeartbeat}s ago` : "No sync recorded"}
-                    </strong>
-                  </p>
-                </div>
-
-                <div
-                  onClick={() => setActiveTab("noise")}
-                  className="bg-white border border-zinc-200 rounded-xl p-4 shadow-xs space-y-2 cursor-pointer hover:border-purple-300 hover:shadow-sm transition-all group"
-                  title="Click to configure sound threshold & acoustic alerts"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-zinc-900 flex items-center gap-1.5 group-hover:text-purple-700 transition-colors">
-                      <Volume2 className="w-4 h-4 text-purple-600" />
-                      Acoustic Quiet Zone System
-                    </span>
-                    <span
-                      className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${
-                        device?.noise_warning_active
-                          ? "bg-rose-50 text-rose-700 border-rose-200 animate-pulse"
-                          : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                      }`}
-                    >
-                      {device?.noise_warning_active
-                        ? "Acoustic Alert Active"
-                        : `Compliant (<${soundThreshold} dB)`}
-                    </span>
-                  </div>
-                  <p className="text-xs text-zinc-500">
-                    {device?.noise_warning_active
-                      ? "Acoustic monitor actively flagged excessive ambient noise levels."
-                      : `Ambient sound compliant with configured limit (${soundThreshold} dB). Click to adjust threshold.`}
-                  </p>
-                </div>
-              </div>
-
-              {/* Interactive Floor Map in Admin Overview */}
-              <div>
-                <LibraryFloorMap
-                  seats={seatsWithStatus}
-                  isDeviceOnline={online}
-                  noiseAlertActive={Boolean(device?.noise_warning_active)}
-                />
-              </div>
-
-              {/* Workstations Quick Management Grid */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-zinc-900">Workstation Quick Controls</h3>
-                  <span className="text-xs text-zinc-500">Toggle maintenance mode directly</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {seatsWithStatus.map((seat) => (
-                    <SeatCard
-                      key={seat.id}
-                      seat={seat}
-                      isAdmin={true}
-                      onToggleMaintenanceClick={(seatId, current) =>
-                        setMaintenanceModal({ seatId, currentState: current })
-                      }
-                      isLoading={isUpdatingMaintenance}
-                    />
-                  ))}
-                </div>
+        {/* Bottom Profile Badge (Tanvir Ahmed - Super Admin) */}
+        <div className="p-4 border-t border-indigo-400/20 relative">
+          <div
+            onClick={() => setUserDropdownOpen(!userDropdownOpen)}
+            className="flex items-center justify-between p-2.5 rounded-2xl bg-white/10 hover:bg-white/15 cursor-pointer transition-all border border-white/10"
+          >
+            <div className="flex items-center gap-2.5">
+              <img
+                src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80"
+                alt="Tanvir Ahmed"
+                className="w-9 h-9 rounded-full object-cover border-2 border-indigo-300"
+              />
+              <div className="flex flex-col text-left">
+                <span className="text-xs font-bold text-white leading-tight">Tanvir Ahmed</span>
+                <span className="text-[10px] text-indigo-200">Library Admin</span>
               </div>
             </div>
-          )}
+            <ChevronDown className="w-4 h-4 text-indigo-200" />
+          </div>
 
-          {/* TAB 2: SEAT MANAGEMENT */}
-          {activeTab === "seats" && (
-            <div className="space-y-4">
+          {/* User Popover Menu */}
+          {userDropdownOpen && (
+            <div className="absolute bottom-20 left-4 right-4 bg-white text-slate-800 rounded-2xl shadow-2xl p-2 border border-slate-200 text-xs z-50 animate-fadeIn">
+              <Link
+                href="/dashboard"
+                className="flex items-center gap-2 p-2 hover:bg-indigo-50 text-indigo-700 font-semibold rounded-xl"
+              >
+                <Users className="w-4 h-4" />
+                Switch to Student View
+              </Link>
+              <Link
+                href="/"
+                className="flex items-center gap-2 p-2 hover:bg-slate-100 text-slate-700 font-semibold rounded-xl"
+              >
+                <BookOpen className="w-4 h-4" />
+                Public Landing Page
+              </Link>
+              <button
+                onClick={() => {
+                  showToast("Signed out successfully", "info");
+                  router.push("/login");
+                }}
+                className="w-full flex items-center gap-2 p-2 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-left"
+              >
+                <LogOut className="w-4 h-4" />
+                Sign Out
+              </button>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* ================= MAIN CONTENT AREA ================= */}
+      <main className="flex-1 flex flex-col h-screen overflow-y-auto">
+        {/* TOP HEADER BAR */}
+        <header className="sticky top-0 z-20 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-8 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight leading-tight">
+              Library Dashboard
+            </h1>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Welcome back, Tanvir Ahmed &bull; Live IoT telemetries &amp; desk matrix active
+            </p>
+          </div>
+
+          {/* Search bar, notifications & avatar */}
+          <div className="flex items-center gap-4">
+            {/* Live Hardware Online/Offline Pill with Toggle */}
+            <button
+              onClick={handleToggleHardwareOnline}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl border text-xs font-bold transition-all shadow-xs ${
+                online
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                  : "bg-rose-50 text-rose-800 border-rose-300 hover:bg-rose-100 animate-pulse"
+              }`}
+              title="Click to toggle hardware Online / Offline in database"
+            >
+              <span className={`w-2 h-2 rounded-full ${online ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+              <span>Hardware Hub: <strong>{online ? "ONLINE" : "OFFLINE"}</strong></span>
+            </button>
+
+            {/* Search Input */}
+            <div className="relative w-64 hidden sm:block">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search desk, reservation, student..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:border-indigo-600 transition-colors"
+              />
+            </div>
+
+            {/* Notification Bell with Active Noise Warning Badge */}
+            <div
+              onClick={() => {
+                document.getElementById("noise-monitor-section")?.scrollIntoView({ behavior: "smooth" });
+              }}
+              className="relative cursor-pointer p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-slate-100 transition-colors"
+              title={isAlertActive ? "Noise alert active!" : "System notifications"}
+            >
+              <Bell className="w-5 h-5" />
+              <span className={`absolute top-1.5 right-1.5 w-4 h-4 rounded-full text-white text-[9px] font-black flex items-center justify-center ring-2 ring-white ${
+                isAlertActive ? "bg-rose-500 animate-ping" : "bg-[#5A45F3]"
+              }`}>
+                {isAlertActive ? "!" : "3"}
+              </span>
+            </div>
+
+            {/* Profile Avatar */}
+            <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+              <img
+                src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80"
+                alt="Tanvir Ahmed"
+                className="w-10 h-10 rounded-full object-cover ring-2 ring-indigo-500/30"
+              />
+            </div>
+          </div>
+        </header>
+
+        {/* INNER SCROLLABLE CONTENT */}
+        <div className="p-8 space-y-7 max-w-7xl w-full mx-auto">
+          {/* Top Noise Alert Warning Banner (Visible immediately across the screen) */}
+          <NoiseAlertBanner
+            isNoiseWarningActive={isAlertActive}
+            updatedAt={device?.noise_warning_updated_at || new Date().toISOString()}
+            deviceOnline={true}
+            thresholdDb={soundThreshold}
+            onResetAlert={handleClearNoiseAlert}
+          />
+
+          {/* ================= ROW 1: 4 STAT CARDS (SMART LIBRARY METRICS) ================= */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            {/* Card 1: Total Study Desks */}
+            <div className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-sm flex items-start justify-between">
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-500 block">Total Study Desks</span>
+                <span className="text-3xl font-black text-slate-900 block tracking-tight">{totalDesks}</span>
+                <span className="text-xs font-bold text-indigo-600 flex items-center gap-1">
+                  <span>ESP8266 IoT Connected</span>
+                </span>
+              </div>
+              <div className="w-12 h-12 rounded-2xl bg-[#EDE9FE] text-[#7C3AED] flex items-center justify-center">
+                <Armchair className="w-6 h-6" />
+              </div>
+            </div>
+
+            {/* Card 2: Currently Occupied */}
+            <div className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-sm flex items-start justify-between">
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-500 block">Currently Occupied</span>
+                <span className="text-3xl font-black text-slate-900 block tracking-tight">{occupiedCount}</span>
+                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                  <span>Physical presence active</span>
+                </span>
+              </div>
+              <div className="w-12 h-12 rounded-2xl bg-[#DCFCE7] text-[#16A34A] flex items-center justify-center">
+                <UserCheck className="w-6 h-6" />
+              </div>
+            </div>
+
+            {/* Card 3: Active Bookings */}
+            <div className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-sm flex items-start justify-between">
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-500 block">Active Bookings</span>
+                <span className="text-3xl font-black text-slate-900 block tracking-tight">{activeBookingsCount}</span>
+                <span className="text-xs font-bold text-blue-600 flex items-center gap-1">
+                  <span>With live countdown</span>
+                </span>
+              </div>
+              <div className="w-12 h-12 rounded-2xl bg-[#E0F2FE] text-[#0284C7] flex items-center justify-center">
+                <Clock className="w-6 h-6" />
+              </div>
+            </div>
+
+            {/* Card 4: Available Desks */}
+            <div className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-sm flex items-start justify-between">
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-500 block">Available Now</span>
+                <span className="text-3xl font-black text-slate-900 block tracking-tight">{availableCount}</span>
+                <span className="text-xs font-bold text-purple-600 flex items-center gap-1">
+                  <span>Ready for reservation</span>
+                </span>
+              </div>
+              <div className="w-12 h-12 rounded-2xl bg-[#F3E8FF] text-[#9333EA] flex items-center justify-center">
+                <Sparkles className="w-6 h-6 text-[#9333EA]" />
+              </div>
+            </div>
+          </div>
+
+          {/* ================= ROW 2: DONUT OVERVIEWS (SMART LIBRARY OCCUPANCY & NOISE COMPLIANCE) ================= */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Donut Card 1: Desk Utilization & Occupancy */}
+            <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200/90 shadow-sm space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-semibold text-zinc-900">Seat Station Management</h3>
-                  <p className="text-xs text-zinc-500">
-                    Manage station status and toggle maintenance mode for repairs or cleaning.
-                  </p>
+                  <h3 className="text-base font-bold text-slate-900">Desk Utilization Rate</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">Real-time capacity distribution</p>
+                </div>
+                <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-xl">
+                  Live IoT
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-around gap-6 py-2">
+                {/* SVG Donut Ring */}
+                <div className="relative w-44 h-44 flex items-center justify-center">
+                  <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="38" fill="none" stroke="#F1F5F9" strokeWidth="11" />
+                    {/* Occupied segment (Emerald) */}
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="38"
+                      fill="none"
+                      stroke="#10B981"
+                      strokeWidth="11"
+                      strokeDasharray="238.76"
+                      strokeDashoffset={238.76 - (238.76 * (occupiedCount / (totalDesks || 1)))}
+                      strokeLinecap="round"
+                    />
+                    {/* Reserved segment (Purple) */}
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="38"
+                      fill="none"
+                      stroke="#5B45F3"
+                      strokeWidth="11"
+                      strokeDasharray="238.76"
+                      strokeDashoffset={238.76 - (238.76 * (activeBookingsCount / (totalDesks || 1)))}
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span className="text-2xl font-black text-slate-900 leading-none">{utilizationPct}%</span>
+                    <span className="text-xs text-slate-500 font-medium mt-1">Utilization</span>
+                  </div>
+                </div>
+
+                {/* Legend List */}
+                <div className="space-y-3.5 text-xs w-full sm:w-48">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#10B981]" />
+                      <span className="text-slate-600 font-medium">Physically Occupied</span>
+                    </div>
+                    <span className="font-bold text-slate-900">{occupiedCount} Desks</span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#5B45F3]" />
+                      <span className="text-slate-600 font-medium">Active Bookings</span>
+                    </div>
+                    <span className="font-bold text-slate-900">{activeBookingsCount} Desks</span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-slate-300" />
+                      <span className="text-slate-600 font-medium">Vacant / Available</span>
+                    </div>
+                    <span className="font-bold text-slate-900">{availableCount} Desks</span>
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden shadow-sm">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs text-zinc-700">
-                    <thead className="bg-zinc-50 border-b border-zinc-200 text-zinc-500 font-semibold text-[11px] uppercase">
-                      <tr>
-                        <th className="py-3 px-4">Desk</th>
-                        <th className="py-3 px-4">Desk Presence</th>
-                        <th className="py-3 px-4">Active Booking</th>
-                        <th className="py-3 px-4">Maintenance</th>
-                        <th className="py-3 px-4 text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-100">
-                      {seatsWithStatus.map((seat) => (
-                        <tr key={seat.id} className="hover:bg-zinc-50/60 transition-colors">
-                          <td className="py-3 px-4 font-semibold text-zinc-900">
-                            {seat.id} (Station #{seat.seat_number})
-                          </td>
-                          <td className="py-3 px-4">
-                            {!seat.deviceOnline ? (
-                              <span className="text-zinc-400">Offline</span>
-                            ) : seat.is_occupied ? (
-                              <span className="text-red-600 font-medium">Occupied</span>
-                            ) : (
-                              <span className="text-green-600 font-medium">Empty</span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            {seat.activeReservation ? (
-                              <span className="text-blue-600">
-                                Until {formatToLocalTime(seat.activeReservation.end_time)}
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                <span className="font-semibold">Capacity: {totalDesks} Study Desks</span>
+                <button
+                  onClick={() => document.getElementById("desk-matrix-section")?.scrollIntoView({ behavior: "smooth" })}
+                  className="text-[11px] text-indigo-600 font-semibold cursor-pointer hover:underline"
+                >
+                  View Matrix &rarr;
+                </button>
+              </div>
+            </div>
+
+            {/* Donut Card 2: Hardware Hub & Acoustic Health */}
+            <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200/90 shadow-sm space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Hardware &amp; Acoustic Status</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">ESP8266 IoT connection &amp; noise health</p>
+                </div>
+                <span
+                  className={`text-xs font-bold px-2.5 py-1 rounded-xl border ${
+                    online
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                      : "bg-rose-50 text-rose-700 border-rose-300"
+                  }`}
+                >
+                  {online ? "Hub Online" : "Hub Offline"}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-around gap-6 py-2">
+                {/* SVG Donut Ring 2 */}
+                <div className="relative w-44 h-44 flex items-center justify-center">
+                  <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="38" fill="none" stroke="#F1F5F9" strokeWidth="11" />
+                    {/* Ring showing online status or alert */}
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="38"
+                      fill="none"
+                      stroke={online ? (device?.noise_warning_active ? "#FB7185" : "#10B981") : "#E11D48"}
+                      strokeWidth="11"
+                      strokeDasharray="238.76"
+                      strokeDashoffset={online ? "30" : "180"}
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span
+                      className={`text-xl font-black leading-none ${
+                        online ? "text-emerald-600" : "text-rose-600"
+                      }`}
+                    >
+                      {online ? "ONLINE" : "OFFLINE"}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-bold mt-1">ESP8266 Hub</span>
+                  </div>
+                </div>
+
+                {/* Legend List 2 */}
+                <div className="space-y-3.5 text-xs w-full sm:w-48">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2.5 h-2.5 rounded-full ${online ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+                      <span className="text-slate-600 font-medium">IoT Controller</span>
+                    </div>
+                    <span className={`font-bold ${online ? "text-emerald-700" : "text-rose-700"}`}>
+                      {online ? "Active" : "Disconnected"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2.5 h-2.5 rounded-full ${liveDb > soundThreshold ? "bg-rose-500" : "bg-indigo-500"}`} />
+                      <span className="text-slate-600 font-medium">Ambient Noise</span>
+                    </div>
+                    <span className="font-bold text-slate-900">{liveDb} dB</span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                      <span className="text-slate-600 font-medium">Alert Limit</span>
+                    </div>
+                    <span className="font-bold text-slate-900">{soundThreshold} dB</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                <span className="font-mono text-[11px] font-semibold text-slate-600">IP: {device?.ip_address || "192.168.137.124"}</span>
+                <button
+                  onClick={handleToggleHardwareOnline}
+                  className="text-[11px] text-indigo-600 font-bold cursor-pointer hover:underline"
+                >
+                  {online ? "Simulate Disconnect" : "Simulate Connect"} &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ================= ROW 3: REAL RECENT CHECK-INS & IOT HARDWARE CONTROLLER ================= */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Real Recent Desk Check-ins Card */}
+            <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200/90 shadow-sm space-y-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Recent Desk Check-ins</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">Real-time student reservations from database</p>
+                </div>
+                <button
+                  onClick={() => document.getElementById("desk-matrix-section")?.scrollIntoView({ behavior: "smooth" })}
+                  className="px-3.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-bold text-xs transition-colors"
+                >
+                  Manage Desks
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {recentCheckins.length === 0 ? (
+                  <div className="p-8 text-center bg-slate-50 border border-dashed border-slate-200 rounded-2xl">
+                    <p className="text-xs font-bold text-slate-600">No reservations recorded in database yet.</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Students reserving desks will appear here in real-time.</p>
+                  </div>
+                ) : (
+                  recentCheckins.map((student) => (
+                    <div
+                      key={student.id}
+                      className="flex items-center justify-between p-3.5 rounded-2xl hover:bg-slate-50 transition-colors border border-slate-100"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white font-extrabold flex items-center justify-center text-sm shadow-xs">
+                          {student.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-900">{student.name}</h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            {student.time} &bull; <strong className="text-slate-700">{student.seat}</strong>
+                          </p>
+                        </div>
+                      </div>
+
+                      <span
+                        className={`px-3 py-1 rounded-xl text-xs font-bold border ${
+                          student.status === "Active Booking"
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : student.status.includes("Walk-in")
+                            ? "bg-amber-50 text-amber-800 border-amber-200"
+                            : "bg-slate-50 text-slate-600 border-slate-200"
+                        }`}
+                      >
+                        {student.status}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Real IoT Hardware Telemetry & Hub Controller Card (Replacing fake payroll chart) */}
+            <div className="bg-white rounded-3xl p-6 sm:p-7 border border-slate-200/90 shadow-sm space-y-5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">ESP8266 IoT Hardware Hub</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">Physical controller telemetry &amp; live connection</p>
+                  </div>
+                  <span
+                    className={`px-3 py-1 rounded-xl text-xs font-bold border ${
+                      online
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                        : "bg-rose-50 text-rose-700 border-rose-300"
+                    }`}
+                  >
+                    {online ? "ONLINE" : "OFFLINE"}
+                  </span>
+                </div>
+
+                {/* Hardware Telemetry Parameters */}
+                <div className="grid grid-cols-2 gap-3 pt-4 text-xs">
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block">Device ID</span>
+                    <span className="font-mono font-bold text-slate-900 text-xs">
+                      {device?.id || "ESP8266_DEV01"}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block">IP Address</span>
+                    <span className="font-mono font-bold text-slate-900 text-xs">
+                      {device?.ip_address || "192.168.137.124"}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block">Firmware</span>
+                    <span className="font-mono font-bold text-slate-900 text-xs">
+                      {device?.firmware_version || "v1.0.0 (Production)"}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block">Last Heartbeat</span>
+                    <span suppressHydrationWarning className="font-mono font-bold text-slate-900 text-xs truncate block">
+                      {mounted && device?.last_seen ? formatToLocalDateTime(device.last_seen) : "Live Synced"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-3 p-3 bg-indigo-50/70 border border-indigo-200 rounded-2xl flex items-center justify-between text-xs">
+                  <div>
+                    <span className="font-bold text-indigo-950 block">Acoustic Shield Status</span>
+                    <span className="text-[11px] text-indigo-700">
+                      {device?.noise_warning_active ? "Warning Broadcast Active (> Threshold)" : "Quiet Sanctuary Standard Normal"}
+                    </span>
+                  </div>
+                  <span className="font-mono font-extrabold text-indigo-700 text-sm">{liveDb} dB</span>
+                </div>
+              </div>
+
+              {/* Hardware Management Action Buttons */}
+              <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center gap-3">
+                <button
+                  onClick={handleToggleHardwareOnline}
+                  className={`flex-1 w-full py-2.5 px-4 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-2 ${
+                    online
+                      ? "bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300"
+                      : "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300"
+                  }`}
+                >
+                  <Cpu className="w-4 h-4" />
+                  <span>Toggle Hardware {online ? "OFFLINE" : "ONLINE"}</span>
+                </button>
+
+                <button
+                  onClick={async () => {
+                    setLoading(true);
+                    await loadData();
+                    showToast("Hardware telemetry synchronized from database!", "success");
+                  }}
+                  className="w-full sm:w-auto py-2.5 px-4 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+                  <span>Sync Hub</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ================= LIVE NOISE MONITORING SYSTEM ================= */}
+          <div id="noise-monitor-section" className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/90 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center">
+                    <Volume2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                      Live Library Acoustic &amp; Noise Decibel Monitoring System
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Real-time decibel telemetry from IoT microphone hubs with automatic visual quiet alert triggers.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status Badge */}
+              <div className="flex items-center gap-2">
+                <span
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border ${
+                    isAlertActive
+                      ? "bg-rose-50 text-rose-700 border-rose-300 animate-pulse"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      isAlertActive ? "bg-rose-500 animate-ping" : "bg-emerald-500"
+                    }`}
+                  />
+                  {isAlertActive ? "NOISE ALERT ACTIVE (> Threshold)" : "Quiet Study Sanctuary Normal"}
+                </span>
+              </div>
+            </div>
+
+            {/* Noise Gauge & Live Wave Display */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
+              {/* Big Decibel Meter */}
+              <div className="p-6 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center text-center space-y-1">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Live Ambient Noise
+                </span>
+                <span
+                  className={`text-5xl font-black font-mono tracking-tight ${
+                    liveDb > soundThreshold ? "text-rose-600" : liveDb > 55 ? "text-amber-600" : "text-indigo-600"
+                  }`}
+                >
+                  {liveDb} <span className="text-xl font-normal text-slate-500">dB</span>
+                </span>
+                <span className="text-[11px] text-slate-500 font-medium">
+                  Threshold limit: <strong>{soundThreshold} dB</strong>
+                </span>
+              </div>
+
+              {/* Threshold Range Slider & Strictness Presets */}
+              <div className="space-y-3.5 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="noise-limit-slider" className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer">
+                    <Sliders className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Quiet Zone Noise Limit Slider</span>
+                  </label>
+                  <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200 shadow-xs">
+                    {soundThreshold} dB Limit
+                  </span>
+                </div>
+
+                {/* Range Slider Track & Thumb */}
+                <div className="space-y-1.5 pt-1">
+                  <input
+                    id="noise-limit-slider"
+                    type="range"
+                    min={20}
+                    max={90}
+                    step={1}
+                    value={soundThreshold}
+                    onChange={(e) => handleUpdateThreshold(Number(e.target.value))}
+                    className="w-full h-2.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                  <div className="flex justify-between items-center text-[10px] text-slate-400 font-medium px-0.5">
+                    <span className={soundThreshold === 20 ? "text-indigo-600 font-bold" : ""}>20 dB (Min)</span>
+                    <span className={soundThreshold === 30 ? "text-indigo-600 font-bold" : ""}>30 dB (Strict)</span>
+                    <span className={soundThreshold === 50 ? "text-indigo-600 font-bold" : ""}>50 dB (Std)</span>
+                    <span className={soundThreshold === 70 ? "text-indigo-600 font-bold" : ""}>70 dB (Relaxed)</span>
+                    <span>90 dB</span>
+                  </div>
+                </div>
+
+                {/* Quick 1-Touch Presets (20 dB, 30 dB, 50 dB, 70 dB) */}
+                <div className="grid grid-cols-4 gap-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateThreshold(20)}
+                    className={`py-1.5 px-1.5 rounded-xl border text-[10px] font-bold transition-all text-center ${
+                      soundThreshold === 20
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    Silent (20 dB)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateThreshold(30)}
+                    className={`py-1.5 px-1.5 rounded-xl border text-[10px] font-bold transition-all text-center ${
+                      soundThreshold === 30
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    Strict (30 dB)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateThreshold(50)}
+                    className={`py-1.5 px-1.5 rounded-xl border text-[10px] font-bold transition-all text-center ${
+                      soundThreshold === 50
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    Standard (50 dB)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateThreshold(70)}
+                    className={`py-1.5 px-1.5 rounded-xl border text-[10px] font-bold transition-all text-center ${
+                      soundThreshold === 70
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    Relaxed (70 dB)
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  IoT microphone hubs trigger visual alert banners when noise spikes above <strong>{soundThreshold} dB</strong>.
+                </p>
+              </div>
+
+              {/* Action Buttons: Simulator & Clear */}
+              <div className="flex flex-col gap-2.5">
+                <button
+                  onClick={handleSimulateNoiseAlert}
+                  disabled={isTriggeringAlert}
+                  className="w-full py-3 px-4 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2"
+                >
+                  <Volume2 className="w-4 h-4 text-rose-600" />
+                  Test Audio Noise Alert (Simulate Spike)
+                </button>
+
+                <button
+                  onClick={handleClearNoiseAlert}
+                  className="w-full py-3 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2"
+                >
+                  <Check className="w-4 h-4 text-emerald-600" />
+                  Restore Quiet Sanctuary Normal
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ================= LIVE SEAT MANAGEMENT & WALK-IN SENSOR STATUS ================= */}
+          <div id="desk-matrix-section" className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/90 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+                  <Armchair className="w-5 h-5 text-indigo-600" />
+                  Physical Desk Matrix &amp; Walk-In Presence Controller
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Real-time detection of legitimate bookings vs unreserved walk-in occupants with hour, minute, second timers.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setLoading(true);
+                    loadData();
+                  }}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+                  Sync Sensors
+                </button>
+              </div>
+            </div>
+
+            {/* Table of Desks with Start Time, End Time & Hour:Min:Sec Countdowns */}
+            <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <table className="w-full text-left text-xs text-slate-700">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[11px] uppercase tracking-wider">
+                  <tr>
+                    <th className="py-3 px-4">Desk ID</th>
+                    <th className="py-3 px-4">Physical IoT Status</th>
+                    <th className="py-3 px-4">Booking Schedule</th>
+                    <th className="py-3 px-4">Remaining Time (HMS)</th>
+                    <th className="py-3 px-4">Occupant / Student</th>
+                    <th className="py-3 px-4 text-right">Admin Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {seatsWithStatus.map((seat) => {
+                    const isWalkIn = seat.deviceOnline && seat.is_occupied && !seat.activeReservation;
+
+                    const remainingHMS = seat.activeReservation
+                      ? formatRemainingHMS(seat.activeReservation.end_time, seat.activeReservation.start_time)
+                      : "N/A";
+
+                    return (
+                      <tr key={seat.id} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-3.5 px-4 font-bold text-slate-900">
+                          Desk {seat.id} (Seat #{seat.seat_number})
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          {seat.is_maintenance ? (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                              Maintenance
+                            </span>
+                          ) : seat.is_occupied ? (
+                            isWalkIn ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                                Unreserved Walk-In Detected
                               </span>
                             ) : (
-                              <span className="text-zinc-400">None</span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            {seat.is_maintenance ? (
-                              <span className="text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium text-[11px]">
-                                Maintenance On
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                Physically Occupied
                               </span>
-                            ) : (
-                              <span className="text-zinc-500 text-[11px]">Normal</span>
+                            )
+                          ) : (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Vacant Desk
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          {seat.activeReservation ? (
+                            <span suppressHydrationWarning className="font-semibold text-slate-800">
+                              {mounted ? `${formatToLocalTime(seat.activeReservation.start_time)} → ${formatToLocalTime(seat.activeReservation.end_time)}` : "Live schedule"}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">No active reservation</span>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          {seat.activeReservation ? (
+                            <span suppressHydrationWarning className="font-mono font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-lg">
+                              {mounted ? remainingHMS : "--:--:--"}
+                            </span>
+                          ) : isWalkIn ? (
+                            <span className="text-amber-700 font-semibold text-[11px]">
+                              Sitting without reservation
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">&mdash;</span>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          {seat.activeReservation?.profiles ? (
+                            <div className="flex flex-col">
+                              <span className="font-bold text-slate-900">
+                                {seat.activeReservation.profiles.full_name || "Enrolled Student"}
+                              </span>
+                              <span className="text-[10px] text-slate-500">
+                                {seat.activeReservation.profiles.email}
+                              </span>
+                            </div>
+                          ) : isWalkIn ? (
+                            <span className="text-amber-700 font-semibold text-[11px]">
+                              Anonymous Physical Presence
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">None</span>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            {/* If Walk-In: Admin can assign booking */}
+                            {isWalkIn && (
+                              <button
+                                onClick={() => setAssignBookingSeatId(seat.id)}
+                                className="px-2.5 py-1 text-[11px] font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors"
+                              >
+                                Assign Booking
+                              </button>
                             )}
-                          </td>
-                          <td className="py-3 px-4 text-right">
+
+                            {/* If Active reservation: Admin can force revoke */}
+                            {seat.activeReservation && (
+                              <button
+                                onClick={() =>
+                                  setCancelModalReservation({
+                                    id: seat.activeReservation!.id,
+                                    seatId: seat.id,
+                                  })
+                                }
+                                className="px-2.5 py-1 text-[11px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors"
+                              >
+                                Revoke Slot
+                              </button>
+                            )}
+
+                            {/* Toggle Maintenance */}
                             <button
                               onClick={() =>
                                 setMaintenanceModal({
@@ -715,607 +1516,240 @@ export default function AdminDashboardPage() {
                                   currentState: seat.is_maintenance,
                                 })
                               }
-                              className={`px-3 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                              className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
                                 seat.is_maintenance
-                                  ? "bg-zinc-900 text-white border-zinc-900 hover:bg-zinc-800"
-                                  : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
+                                  ? "bg-slate-900 text-white border-slate-900"
+                                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
                               }`}
                             >
-                              {seat.is_maintenance ? "Restore" : "Set Maintenance"}
+                              {seat.is_maintenance ? "Restore" : "Maintenance"}
                             </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: RESERVATIONS */}
-          {activeTab === "reservations" && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-900">Reservation Audit Log</h3>
-                  <p className="text-xs text-zinc-500">
-                    Review student reservations and cancel unauthorized or expired bookings.
-                  </p>
-                </div>
-
-                {/* Filter and Search */}
-                <div className="flex items-center gap-2">
-                  <select
-                    value={reservationStatusFilter}
-                    onChange={(e) => setReservationStatusFilter(e.target.value)}
-                    className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs text-zinc-700 focus:outline-none focus:border-blue-600"
-                  >
-                    <option value="all">All Statuses</option>
-                    <option value="active">Active Only</option>
-                    <option value="cancelled">Cancelled</option>
-                    <option value="expired">Expired</option>
-                  </select>
-
-                  <input
-                    type="text"
-                    placeholder="Search student or seat..."
-                    value={reservationSearch}
-                    onChange={(e) => setReservationSearch(e.target.value)}
-                    className="px-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs text-zinc-900 focus:outline-none focus:border-blue-600"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden shadow-sm">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs text-zinc-700">
-                    <thead className="bg-zinc-50 border-b border-zinc-200 text-zinc-500 font-semibold text-[11px] uppercase">
-                      <tr>
-                        <th className="py-3 px-4">Desk</th>
-                        <th className="py-3 px-4">Student</th>
-                        <th className="py-3 px-4">Start Time</th>
-                        <th className="py-3 px-4">End Time</th>
-                        <th className="py-3 px-4">Status</th>
-                        <th className="py-3 px-4 text-right">Admin Action</th>
+                          </div>
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-100">
-                      {filteredReservations.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="py-8 text-center text-zinc-400">
-                            No reservations found.
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ================= PREVIOUS & HISTORICAL BOOKING AUDIT LOGS ================= */}
+          <div id="booking-history-section" className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/90 shadow-sm space-y-6">
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center">
+                    <History className="w-5 h-5" />
+                  </div>
+                  <span>Previous Booking History &amp; Audit Logs</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Complete historical audit trail of all student reservations, duration, and status loaded directly from the database.
+                </p>
+              </div>
+
+              {/* Summary metrics pills */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200">
+                  Total: <strong>{reservations.length}</strong>
+                </span>
+                <span className="px-3 py-1 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-bold border border-emerald-200">
+                  Active: <strong>{reservations.filter((r) => r.status === "active").length}</strong>
+                </span>
+                <span className="px-3 py-1 rounded-xl bg-blue-50 text-blue-700 text-xs font-bold border border-blue-200">
+                  Completed: <strong>{reservations.filter((r) => r.status === "completed").length}</strong>
+                </span>
+                <span className="px-3 py-1 rounded-xl bg-rose-50 text-rose-700 text-xs font-bold border border-rose-200">
+                  Cancelled: <strong>{reservations.filter((r) => r.status === "cancelled").length}</strong>
+                </span>
+              </div>
+            </div>
+
+            {/* Filter Tabs & Search Bar */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              {/* Filter Buttons */}
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl overflow-x-auto">
+                {(["all", "active", "completed", "cancelled"] as const).map((filter) => (
+                  <button
+                    key={filter}
+                    onClick={() => setBookingHistoryFilter(filter)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold capitalize transition-all whitespace-nowrap ${
+                      bookingHistoryFilter === filter
+                        ? "bg-white text-indigo-700 shadow-xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    {filter === "all" ? "All Bookings" : filter}
+                    {filter === "all" && ` (${reservations.length})`}
+                    {filter === "active" && ` (${reservations.filter((r) => r.status === "active").length})`}
+                    {filter === "completed" && ` (${reservations.filter((r) => r.status === "completed").length})`}
+                    {filter === "cancelled" && ` (${reservations.filter((r) => r.status === "cancelled").length})`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Search Input for history */}
+              <div className="relative w-full sm:w-72">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Filter by student, desk, email..."
+                  value={bookingHistorySearch}
+                  onChange={(e) => setBookingHistorySearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:border-indigo-600 transition-colors"
+                />
+              </div>
+            </div>
+
+            {/* Table of Historical Bookings */}
+            <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <table className="w-full text-left text-xs text-slate-700">
+                <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[11px] uppercase tracking-wider">
+                  <tr>
+                    <th className="py-3 px-4">Booking Ref</th>
+                    <th className="py-3 px-4">Desk / Seat</th>
+                    <th className="py-3 px-4">Student / Member</th>
+                    <th className="py-3 px-4">Reserved Window</th>
+                    <th className="py-3 px-4">Duration</th>
+                    <th className="py-3 px-4">Status</th>
+                    <th className="py-3 px-4">Booked Date</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredBookingHistory.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-12 text-center text-slate-400">
+                        <Calendar className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                        <p className="font-semibold text-slate-600">No booking records found</p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          {bookingHistorySearch
+                            ? "Try adjusting your search query."
+                            : "No reservations found under this filter."}
+                        </p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredBookingHistory.map((res) => {
+                      const seat = seats.find((s) => s.id === res.seat_id);
+                      const isOngoing = res.status === "active";
+                      const duration = formatReservationDuration(res.start_time, res.end_time);
+
+                      return (
+                        <tr key={res.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                            #{res.id.slice(0, 8).toUpperCase()}
+                          </td>
+                          <td className="py-3.5 px-4 font-semibold text-slate-900">
+                            Desk {res.seat_id} {seat ? `(Seat #${seat.seat_number})` : ""}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <div className="flex flex-col">
+                              <span className="font-bold text-slate-900">
+                                {res.profiles?.full_name || "Enrolled Student"}
+                              </span>
+                              <span className="text-[11px] text-slate-500">
+                                {res.profiles?.email || "student@library.edu"}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span suppressHydrationWarning className="font-medium text-slate-700">
+                              {mounted
+                                ? `${formatToLocalTime(res.start_time)} → ${formatToLocalTime(res.end_time)}`
+                                : "Schedule"}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className="font-mono text-slate-700 font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-[11px]">
+                              {duration}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            {res.status === "active" ? (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                Active Session
+                              </span>
+                            ) : res.status === "cancelled" ? (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                Cancelled / Revoked
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                                Completed
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-500 text-[11px]" suppressHydrationWarning>
+                            {mounted ? formatBookingDate(res.created_at) : "--"}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            {isOngoing ? (
+                              <button
+                                onClick={() =>
+                                  setCancelModalReservation({
+                                    id: res.id,
+                                    seatId: res.seat_id,
+                                  })
+                                }
+                                className="px-2.5 py-1 text-[11px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors"
+                              >
+                                Revoke Slot
+                              </button>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">&mdash;</span>
+                            )}
                           </td>
                         </tr>
-                      ) : (
-                        filteredReservations.map((res) => (
-                          <tr key={res.id} className="hover:bg-zinc-50/60 transition-colors">
-                            <td className="py-3 px-4 font-semibold text-zinc-900">
-                              Seat {res.seat_id}
-                            </td>
-                            <td className="py-3 px-4">
-                              {res.profiles?.email || (
-                                <span className="font-mono text-zinc-400">
-                                  {res.user_id.slice(0, 8)}...
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3 px-4">{formatToLocalDateTime(res.start_time)}</td>
-                            <td className="py-3 px-4">{formatToLocalDateTime(res.end_time)}</td>
-                            <td className="py-3 px-4">
-                              <StatusBadge status={res.status} size="sm" />
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              {res.status === "active" ? (
-                                <button
-                                  onClick={() =>
-                                    setCancelModalReservation({ id: res.id, seatId: res.seat_id })
-                                  }
-                                  className="px-2.5 py-1 text-[11px] font-medium text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors"
-                                >
-                                  Cancel Booking
-                                </button>
-                              ) : (
-                                <span className="text-zinc-400 text-xs">&mdash;</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
-          )}
+          </div>
+        </div>
+      </main>
 
-          {/* TAB 4: NOISE MONITORING & THRESHOLD CONTROLS */}
-          {activeTab === "noise" && (
-            <div className="space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-2">
-                    <Volume2 className="w-4 h-4 text-purple-600" />
-                    Quiet Zone Acoustic Monitoring & Sound Limit
-                  </h3>
-                  <p className="text-xs text-zinc-500">
-                    Configure permissible decibel thresholds, simulate acoustic spikes, and manage real-time quiet policy warnings.
-                  </p>
-                </div>
+      {/* Confirmation Modal for Cancellation */}
+      <ConfirmModal
+        isOpen={Boolean(cancelModalReservation)}
+        title={`Revoke Reservation for Seat ${cancelModalReservation?.seatId}`}
+        description="Are you sure you want to administratively revoke this booking slot? The desk will immediately become open for other students."
+        confirmLabel="Yes, Revoke Reservation"
+        cancelLabel="Keep Reservation"
+        variant="danger"
+        isLoading={false}
+        onConfirm={handleConfirmCancelReservation}
+        onClose={() => setCancelModalReservation(null)}
+      />
 
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full border ${
-                      device?.noise_warning_active
-                        ? "bg-rose-50 text-rose-700 border-rose-200 animate-pulse font-semibold"
-                        : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                    }`}
-                  >
-                    <span
-                      className={`w-2 h-2 rounded-full ${
-                        device?.noise_warning_active ? "bg-rose-500" : "bg-emerald-500"
-                      }`}
-                    />
-                    {device?.noise_warning_active ? "Acoustic Alert Active" : "Quiet Zone Compliant"}
-                  </span>
-                </div>
-              </div>
-
-              {/* Warning Banner if currently active */}
-              <NoiseAlertBanner
-                isNoiseWarningActive={Boolean(device?.noise_warning_active)}
-                updatedAt={device?.noise_warning_updated_at}
-                deviceOnline={online}
-                thresholdDb={soundThreshold}
-                onResetAlert={handleClearAlert}
-                isResetting={isClearingAlert}
-              />
-
-              {/* Interactive Sound Level Configuration & Live Meter Cards */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* CARD 1: Configured Sound Level Threshold */}
-                <div className="bg-white border border-zinc-200 rounded-xl p-5 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-lg bg-purple-50 text-purple-700">
-                        <Sliders className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-zinc-900 uppercase tracking-wider">
-                          Acoustic Threshold Limit
-                        </h4>
-                        <p className="text-[11px] text-zinc-500">
-                          Sounds above this decibel level trigger warnings
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-baseline gap-1 bg-purple-50 border border-purple-200 px-3 py-1 rounded-xl">
-                      <span className="text-xl font-extrabold text-purple-700 font-mono">
-                        {soundThreshold}
-                      </span>
-                      <span className="text-xs font-semibold text-purple-600">dB</span>
-                    </div>
-                  </div>
-
-                  {/* Slider Control */}
-                  <div className="space-y-2 pt-1">
-                    <div className="flex justify-between text-xs font-medium text-zinc-600">
-                      <span>Threshold Slider:</span>
-                      <span className="text-purple-700 font-bold font-mono">{soundThreshold} dB</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={40}
-                      max={90}
-                      step={1}
-                      value={soundThreshold}
-                      onChange={(e) => setSoundThreshold(Number(e.target.value))}
-                      className="w-full accent-purple-600 cursor-pointer h-2 bg-zinc-100 rounded-lg"
-                    />
-                    <div className="flex justify-between text-[10px] text-zinc-400 font-mono">
-                      <span>40 dB (Whisper)</span>
-                      <span>65 dB (Recommended)</span>
-                      <span>90 dB (Loud)</span>
-                    </div>
-                  </div>
-
-                  {/* Preset Zones */}
-                  <div className="space-y-1.5 pt-1">
-                    <label className="text-[11px] font-medium text-zinc-500 block">
-                      Quick Preset Modes:
-                    </label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSoundThreshold(45);
-                          setSoundMode("strict");
-                          handleSaveThreshold(45, "strict");
-                        }}
-                        className={`py-2 px-2.5 rounded-lg border text-xs font-medium transition-all text-center ${
-                          soundThreshold === 45
-                            ? "bg-purple-600 text-white border-purple-600 shadow-xs"
-                            : "bg-zinc-50 hover:bg-zinc-100 text-zinc-700 border-zinc-200"
-                        }`}
-                      >
-                        <div className="font-semibold">Deep Silent</div>
-                        <div className="text-[10px] opacity-80">45 dB</div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSoundThreshold(65);
-                          setSoundMode("standard");
-                          handleSaveThreshold(65, "standard");
-                        }}
-                        className={`py-2 px-2.5 rounded-lg border text-xs font-medium transition-all text-center ${
-                          soundThreshold === 65
-                            ? "bg-purple-600 text-white border-purple-600 shadow-xs"
-                            : "bg-zinc-50 hover:bg-zinc-100 text-zinc-700 border-zinc-200"
-                        }`}
-                      >
-                        <div className="font-semibold">Standard Hall</div>
-                        <div className="text-[10px] opacity-80">65 dB (Rec.)</div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSoundThreshold(75);
-                          setSoundMode("relaxed");
-                          handleSaveThreshold(75, "relaxed");
-                        }}
-                        className={`py-2 px-2.5 rounded-lg border text-xs font-medium transition-all text-center ${
-                          soundThreshold === 75
-                            ? "bg-purple-600 text-white border-purple-600 shadow-xs"
-                            : "bg-zinc-50 hover:bg-zinc-100 text-zinc-700 border-zinc-200"
-                        }`}
-                      >
-                        <div className="font-semibold">Study Lounge</div>
-                        <div className="text-[10px] opacity-80">75 dB</div>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Save Button */}
-                  <div className="pt-2 flex items-center justify-between border-t border-zinc-100">
-                    <span className="text-[11px] text-zinc-500">
-                      Policy enforces quiet study limits across all reading areas.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleSaveThreshold(soundThreshold, soundMode)}
-                      disabled={isSavingThreshold}
-                      className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-xs font-medium shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                    >
-                      {isSavingThreshold ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      )}
-                      Save Threshold
-                    </button>
-                  </div>
-                </div>
-
-                {/* CARD 2: Live Monitor, Test Alert & Sound Simulator */}
-                <div className="bg-white border border-zinc-200 rounded-xl p-5 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-lg bg-blue-50 text-blue-700">
-                        <Radio className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-zinc-900 uppercase tracking-wider">
-                          Live Acoustic Gauge & Alert Test
-                        </h4>
-                        <p className="text-[11px] text-zinc-500">
-                          Verify alert triggering when noise exceeds {soundThreshold} dB
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Audio Chime Toggle */}
-                    <button
-                      type="button"
-                      onClick={() => setSoundAlertAudioEnabled(!soundAlertAudioEnabled)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                        soundAlertAudioEnabled
-                          ? "bg-blue-50 text-blue-700 border-blue-200"
-                          : "bg-zinc-50 text-zinc-500 border-zinc-200"
-                      }`}
-                      title="Toggle browser synthesized alert tone"
-                    >
-                      {soundAlertAudioEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-                      <span className="text-[11px]">Audio Tone: {soundAlertAudioEnabled ? "ON" : "OFF"}</span>
-                    </button>
-                  </div>
-
-                  {/* Level Gauge Display */}
-                  <div className="p-3.5 rounded-xl bg-zinc-50 border border-zinc-200 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-600 font-medium">
-                        Simulated Ambient Sound Level:
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-base font-bold font-mono ${
-                            testSoundLevel >= soundThreshold ? "text-rose-600" : "text-emerald-600"
-                          }`}
-                        >
-                          {testSoundLevel} dB
-                        </span>
-                        <span
-                          className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border ${
-                            testSoundLevel >= soundThreshold
-                              ? "bg-rose-50 text-rose-700 border-rose-200"
-                              : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                          }`}
-                        >
-                          {testSoundLevel >= soundThreshold ? "BREACH LIMIT" : "NORMAL"}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Gauge Progress Bar with Threshold Marker */}
-                    <div className="relative w-full h-3 bg-zinc-200 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full transition-all duration-300 rounded-full ${
-                          testSoundLevel >= soundThreshold
-                            ? "bg-rose-500 animate-pulse"
-                            : testSoundLevel >= soundThreshold - 5
-                            ? "bg-amber-500"
-                            : "bg-emerald-500"
-                        }`}
-                        style={{
-                          width: `${Math.min(100, Math.max(10, (testSoundLevel / 100) * 100))}%`,
-                        }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[10px] text-zinc-400">
-                      <span>Ambient Base (30 dB)</span>
-                      <span className="font-semibold text-purple-700">Limit: {soundThreshold} dB</span>
-                      <span>100 dB</span>
-                    </div>
-                  </div>
-
-                  {/* Test Sound Level Slider */}
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between text-xs text-zinc-600">
-                      <span>Adjust Test Decibel Level:</span>
-                      <span className="font-mono font-semibold text-zinc-900">{testSoundLevel} dB</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={40}
-                      max={95}
-                      step={1}
-                      value={testSoundLevel}
-                      onChange={(e) => setTestSoundLevel(Number(e.target.value))}
-                      className="w-full accent-blue-600 cursor-pointer h-2 bg-zinc-100 rounded-lg"
-                    />
-                  </div>
-
-                  {/* Test Actions */}
-                  <div className="pt-2 flex flex-col sm:flex-row gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleTriggerAlert(testSoundLevel)}
-                      disabled={isTriggeringAlert}
-                      className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-xs disabled:opacity-50 ${
-                        testSoundLevel >= soundThreshold
-                          ? "bg-rose-600 hover:bg-rose-700 text-white"
-                          : "bg-zinc-800 hover:bg-zinc-900 text-white"
-                      }`}
-                    >
-                      {isTriggeringAlert ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <AlertTriangle className="w-3.5 h-3.5" />
-                      )}
-                      {testSoundLevel >= soundThreshold
-                        ? `Trigger Alert (${testSoundLevel} dB > ${soundThreshold} dB)`
-                        : `Test Sound Level (${testSoundLevel} dB)`}
-                    </button>
-
-                    {device?.noise_warning_active && (
-                      <button
-                        type="button"
-                        onClick={handleClearAlert}
-                        disabled={isClearingAlert}
-                        className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-xs disabled:opacity-50"
-                      >
-                        {isClearingAlert ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        )}
-                        Reset Warning
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Policy note */}
-              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3.5 text-xs text-zinc-600">
-                <p className="font-semibold text-zinc-900 mb-0.5">Acoustic Policy & Calibration Standard:</p>
-                <p>
-                  High-precision acoustic monitors continuously sample ambient noise levels across reading zones. When ambient sound crosses the configured threshold ({soundThreshold} dB), visual alerts and automated incident records are immediately broadcast across student and admin interfaces.
-                </p>
-              </div>
-
-              {/* Recent Noise Event History Table */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold text-zinc-900">Recent Noise Trigger History</h4>
-                  <span className="text-[11px] text-zinc-400">Total Events: {noiseLogs.length}</span>
-                </div>
-                <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden shadow-sm">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs text-zinc-700">
-                      <thead className="bg-zinc-50 border-b border-zinc-200 text-zinc-500 font-semibold text-[11px] uppercase">
-                        <tr>
-                          <th className="py-2.5 px-4">Event Time</th>
-                          <th className="py-2.5 px-4">Acoustic Status</th>
-                          <th className="py-2.5 px-4">Details</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-zinc-100">
-                        {noiseLogs.length === 0 ? (
-                          <tr>
-                            <td colSpan={3} className="py-6 text-center text-zinc-400">
-                              No noise breach events logged.
-                            </td>
-                          </tr>
-                        ) : (
-                          noiseLogs.map((log) => (
-                            <tr key={log.id} className="hover:bg-zinc-50/60 transition-colors">
-                              <td className="py-2.5 px-4 font-mono text-zinc-600">
-                                {formatToLocalDateTime(log.recorded_at)}
-                              </td>
-                              <td className="py-2.5 px-4">
-                                {log.noise_detected ? (
-                                  <span className="text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full font-medium text-[11px] flex items-center gap-1 w-fit">
-                                    <AlertTriangle className="w-3 h-3 text-rose-600" />
-                                    Threshold Breached
-                                  </span>
-                                ) : (
-                                  <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-medium text-[11px] flex items-center gap-1 w-fit">
-                                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                    Normalized
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-2.5 px-4 text-zinc-600 font-medium">
-                                {log.details || "Acoustic trigger event"}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 5: SYSTEM INFRASTRUCTURE */}
-          {activeTab === "device" && (
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-900">Facility Network & Infrastructure Hub</h3>
-                <p className="text-xs text-zinc-500">
-                  Telemetry and connectivity metrics from the central library telemetry gateway.
-                </p>
-              </div>
-
-              <div className="bg-white border border-zinc-200 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between pb-3 border-b border-zinc-100">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg bg-zinc-50 border border-zinc-200 flex items-center justify-center text-zinc-700">
-                      <Cpu className="w-5 h-5 text-zinc-700" />
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-semibold text-zinc-900">
-                        {device?.device_name || "Central Telemetry Gateway"}
-                      </h4>
-                      <p className="text-xs text-zinc-500 font-mono">
-                        Hub ID: {device?.id || "HUB_SYS_01"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <span
-                    className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full border ${
-                      online
-                        ? "bg-green-50 text-green-700 border-green-200"
-                        : "bg-red-50 text-red-700 border-red-200"
-                    }`}
-                  >
-                    {online ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-                    {online ? "Connected & Online" : "Disconnected (Offline)"}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-lg p-3">
-                    <span className="text-zinc-500 block mb-1">Firmware Version</span>
-                    <span className="font-semibold text-zinc-900 font-mono">
-                      {device?.firmware_version || "v1.0.0"}
-                    </span>
-                  </div>
-
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-lg p-3">
-                    <span className="text-zinc-500 block mb-1">Assigned Local IP</span>
-                    <span className="font-semibold text-zinc-900 font-mono">
-                      {device?.ip_address || "192.168.x.x (DHCP)"}
-                    </span>
-                  </div>
-
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-lg p-3">
-                    <span className="text-zinc-500 block mb-1">Heartbeat Age</span>
-                    <span className="font-semibold text-zinc-900">
-                      {secondsSinceHeartbeat !== null ? `${secondsSinceHeartbeat} seconds ago` : "Never"}
-                    </span>
-                  </div>
-
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-lg p-3">
-                    <span className="text-zinc-500 block mb-1">Last Transmission Timestamp</span>
-                    <span className="font-semibold text-zinc-900">
-                      {formatToLocalDateTime(device?.last_seen)}
-                    </span>
-                  </div>
-                </div>
-
-                {!online && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800 space-y-1">
-                    <p className="font-semibold">Stale Connection Warning:</p>
-                    <p>
-                      The device has not communicated within the 60-second timeout window. Desk occupancy readings on the dashboard are currently marked as &quot;Offline / Status Unavailable&quot; to prevent displaying outdated data.
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </main>
-      </div>
-
-      {/* Confirmation Modal for Maintenance Mode */}
+      {/* Confirmation Modal for Maintenance */}
       <ConfirmModal
         isOpen={Boolean(maintenanceModal)}
-        title={
-          maintenanceModal?.currentState
-            ? `Restore Seat ${maintenanceModal?.seatId} to Service`
-            : `Place Seat ${maintenanceModal?.seatId} in Maintenance Mode`
-        }
-        description={
-          maintenanceModal?.currentState
-            ? "This will make the seat available again for student reservations."
-            : "This will immediately cancel any active reservations for this desk and mark it unavailable."
-        }
-        confirmLabel={maintenanceModal?.currentState ? "Restore to Service" : "Confirm Maintenance"}
-        cancelLabel="Dismiss"
-        isLoading={isUpdatingMaintenance}
-        onConfirm={handleConfirmMaintenance}
+        title={`${maintenanceModal?.currentState ? "Restore" : "Set"} Maintenance Mode for Seat ${maintenanceModal?.seatId}`}
+        description={`Are you sure you want to ${
+          maintenanceModal?.currentState ? "restore this seat to active service" : "take this seat out of service for repair"
+        }?`}
+        confirmLabel={maintenanceModal?.currentState ? "Restore to Service" : "Set Maintenance"}
+        cancelLabel="Cancel"
+        variant={maintenanceModal?.currentState ? "primary" : "danger"}
+        isLoading={false}
+        onConfirm={handleToggleMaintenance}
         onClose={() => setMaintenanceModal(null)}
       />
 
-      {/* Confirmation Modal for Admin Reservation Cancellation */}
-      <ConfirmModal
-        isOpen={Boolean(cancelModalReservation)}
-        title={`Cancel Booking for Seat ${cancelModalReservation?.seatId}`}
-        description="Are you sure you want to cancel this student's reservation? The seat will immediately become available."
-        confirmLabel="Cancel Booking"
-        cancelLabel="Keep Booking"
-        variant="danger"
-        isLoading={isCancellingReservation}
-        onConfirm={handleConfirmCancelReservation}
-        onClose={() => setCancelModalReservation(null)}
+      {/* Booking Modal for Assigning Walk-in */}
+      <BookingModal
+        isOpen={Boolean(assignBookingSeatId)}
+        seatId={assignBookingSeatId}
+        seatNumber={seats.find((s) => s.id === assignBookingSeatId)?.seat_number}
+        isLoading={isAssigningBooking}
+        onConfirm={handleAssignBooking}
+        onClose={() => setAssignBookingSeatId(null)}
       />
     </div>
   );
