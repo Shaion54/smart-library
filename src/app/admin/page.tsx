@@ -63,6 +63,14 @@ import {
   Eye,
   Plus,
   History,
+  User,
+  Edit3,
+  Save,
+  Camera,
+  Mail,
+  Phone,
+  Building,
+  X,
 } from "lucide-react";
 
 // Duration formatter for historical reservations
@@ -166,16 +174,132 @@ export default function AdminDashboardPage() {
   const [bookingHistoryFilter, setBookingHistoryFilter] = useState<"all" | "active" | "completed" | "cancelled">("all");
   const [bookingHistorySearch, setBookingHistorySearch] = useState<string>("");
 
+  // Admin Profile State & Customization
+  const [adminId, setAdminId] = useState<string | null>(null);
+  const [adminName, setAdminName] = useState<string>("Tanvir Ahmed");
+  const [adminEmail, setAdminEmail] = useState<string>("admin@smartlibrary.edu");
+  const [adminDesignation, setAdminDesignation] = useState<string>("Library Administrator");
+  const [adminPhone, setAdminPhone] = useState<string>("+880 1712-345678");
+  const [adminOffice, setAdminOffice] = useState<string>("Central Library (Room 102)");
+  const [adminAvatar, setAdminAvatar] = useState<string>(
+    "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80"
+  );
+
+  // Admin Profile Edit Modal State
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
+  const [editName, setEditName] = useState<string>("");
+  const [editDesignation, setEditDesignation] = useState<string>("");
+  const [editPhone, setEditPhone] = useState<string>("");
+  const [editOffice, setEditOffice] = useState<string>("");
+  const [editAvatar, setEditAvatar] = useState<string>("");
+
   // Live ticking clock for countdowns
   const [mounted, setMounted] = useState(false);
   const [now, setNow] = useState(Date.now());
+
+  const supabase = createClient();
+
   useEffect(() => {
     setMounted(true);
     const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
-  const supabase = createClient();
+    // 1. Read persistent admin metadata from localStorage
+    if (typeof window !== "undefined") {
+      try {
+        const savedMeta = localStorage.getItem("smart_library_admin_profile");
+        if (savedMeta) {
+          const parsed = JSON.parse(savedMeta);
+          if (parsed.fullName) setAdminName(parsed.fullName);
+          if (parsed.designation) setAdminDesignation(parsed.designation);
+          if (parsed.phone) setAdminPhone(parsed.phone);
+          if (parsed.office) setAdminOffice(parsed.office);
+          if (parsed.avatar) setAdminAvatar(parsed.avatar);
+        }
+      } catch (e) {
+        console.warn("Could not read local admin profile:", e);
+      }
+    }
+
+    // 2. Load authenticated user and profile from Supabase
+    async function fetchAdminUser() {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (user) {
+          setAdminId(user.id);
+          if (user.email) setAdminEmail(user.email);
+          const { data: profile } = await supabase
+            .from("profiles")
+            .select("*")
+            .eq("id", user.id)
+            .single();
+          if (profile?.full_name) {
+            setAdminName(profile.full_name);
+          }
+        }
+      } catch (err) {
+        console.warn("Notice loading admin profile:", err);
+      }
+    }
+    fetchAdminUser();
+
+    return () => clearInterval(timer);
+  }, [supabase]);
+
+  const handleOpenProfileModal = () => {
+    setEditName(adminName);
+    setEditDesignation(adminDesignation);
+    setEditPhone(adminPhone);
+    setEditOffice(adminOffice);
+    setEditAvatar(adminAvatar);
+    setIsProfileModalOpen(true);
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingProfile(true);
+
+    try {
+      setAdminName(editName);
+      setAdminDesignation(editDesignation);
+      setAdminPhone(editPhone);
+      setAdminOffice(editOffice);
+      setAdminAvatar(editAvatar);
+
+      // Save to Supabase profiles table
+      if (adminId) {
+        await supabase
+          .from("profiles")
+          .update({ full_name: editName })
+          .eq("id", adminId);
+      }
+
+      // Save full admin metadata locally so custom avatars/titles persist
+      if (typeof window !== "undefined") {
+        localStorage.setItem(
+          "smart_library_admin_profile",
+          JSON.stringify({
+            fullName: editName,
+            designation: editDesignation,
+            phone: editPhone,
+            office: editOffice,
+            avatar: editAvatar,
+          })
+        );
+      }
+
+      showToast("Admin profile updated successfully!", "success");
+      setIsProfileModalOpen(false);
+    } catch (err) {
+      console.warn("Could not save to Supabase, saved locally:", err);
+      showToast("Admin profile saved locally!", "success");
+      setIsProfileModalOpen(false);
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
 
   // Initial & periodic data loading (Telemetries & DB records only, NOT noise-settings)
   const loadData = useCallback(async () => {
@@ -568,6 +692,7 @@ export default function AdminDashboardPage() {
     { name: "Acoustic Decibel", icon: Volume2 },
     { name: "Hardware Hub", icon: Cpu },
     { name: "Noise Alerts", icon: Bell },
+    { name: "Admin Profile", icon: User },
   ];
 
   // Dynamic Smart Library stats computed directly from database
@@ -659,7 +784,9 @@ export default function AdminDashboardPage() {
                   key={item.name}
                   onClick={() => {
                     setActiveMenu(item.name);
-                    if (item.name === "Desk Matrix" || item.name === "Presence & Walk-Ins" || item.name === "Active Bookings") {
+                    if (item.name === "Admin Profile") {
+                      handleOpenProfileModal();
+                    } else if (item.name === "Desk Matrix" || item.name === "Presence & Walk-Ins" || item.name === "Active Bookings") {
                       document.getElementById("desk-matrix-section")?.scrollIntoView({ behavior: "smooth" });
                     } else if (item.name === "Acoustic Decibel" || item.name === "Noise Alerts") {
                       document.getElementById("noise-monitor-section")?.scrollIntoView({ behavior: "smooth" });
@@ -681,39 +808,72 @@ export default function AdminDashboardPage() {
           </nav>
         </div>
 
-        {/* Bottom Profile Badge (Tanvir Ahmed - Super Admin) */}
+        {/* Bottom Profile Badge (Admin Profile Quick View & Edit) */}
         <div className="p-4 border-t border-indigo-400/20 relative">
           <div
             onClick={() => setUserDropdownOpen(!userDropdownOpen)}
-            className="flex items-center justify-between p-2.5 rounded-2xl bg-white/10 hover:bg-white/15 cursor-pointer transition-all border border-white/10"
+            className="flex items-center justify-between p-2.5 rounded-2xl bg-white/10 hover:bg-white/15 cursor-pointer transition-all border border-white/10 group"
           >
-            <div className="flex items-center gap-2.5">
-              <img
-                src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80"
-                alt="Tanvir Ahmed"
-                className="w-9 h-9 rounded-full object-cover border-2 border-indigo-300"
-              />
-              <div className="flex flex-col text-left">
-                <span className="text-xs font-bold text-white leading-tight">Tanvir Ahmed</span>
-                <span className="text-[10px] text-indigo-200">Library Admin</span>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="relative shrink-0">
+                <img
+                  src={adminAvatar}
+                  alt={adminName}
+                  className="w-9 h-9 rounded-full object-cover border-2 border-indigo-300 shadow-sm"
+                />
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleOpenProfileModal();
+                  }}
+                  title="Edit Admin Profile"
+                  className="absolute -bottom-1 -right-1 w-4 h-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full flex items-center justify-center border border-white text-[9px] shadow-sm transition-transform hover:scale-110"
+                >
+                  <Edit3 className="w-2.5 h-2.5" />
+                </button>
+              </div>
+              <div className="flex flex-col text-left truncate">
+                <span className="text-xs font-bold text-white leading-tight truncate">
+                  {adminName}
+                </span>
+                <span className="text-[10px] text-indigo-200 truncate">
+                  {adminDesignation}
+                </span>
               </div>
             </div>
-            <ChevronDown className="w-4 h-4 text-indigo-200" />
+            <ChevronDown className="w-4 h-4 text-indigo-200 shrink-0 ml-1" />
           </div>
 
           {/* User Popover Menu */}
           {userDropdownOpen && (
             <div className="absolute bottom-20 left-4 right-4 bg-white text-slate-800 rounded-2xl shadow-2xl p-2 border border-slate-200 text-xs z-50 animate-fadeIn">
+              <div className="px-3 py-2 border-b border-slate-100 mb-1">
+                <p className="font-bold text-slate-900 truncate">{adminName}</p>
+                <p className="text-[10px] text-slate-500 truncate">{adminEmail}</p>
+              </div>
+
+              <button
+                onClick={() => {
+                  setUserDropdownOpen(false);
+                  handleOpenProfileModal();
+                }}
+                className="w-full flex items-center gap-2 p-2 hover:bg-indigo-50 text-indigo-700 font-semibold rounded-xl text-left transition-colors"
+              >
+                <Edit3 className="w-4 h-4" />
+                Edit Admin Profile
+              </button>
+
               <Link
                 href="/dashboard"
-                className="flex items-center gap-2 p-2 hover:bg-indigo-50 text-indigo-700 font-semibold rounded-xl"
+                className="flex items-center gap-2 p-2 hover:bg-indigo-50 text-indigo-700 font-semibold rounded-xl transition-colors"
               >
                 <Users className="w-4 h-4" />
                 Switch to Student View
               </Link>
               <Link
                 href="/"
-                className="flex items-center gap-2 p-2 hover:bg-slate-100 text-slate-700 font-semibold rounded-xl"
+                className="flex items-center gap-2 p-2 hover:bg-slate-100 text-slate-700 font-semibold rounded-xl transition-colors"
               >
                 <BookOpen className="w-4 h-4" />
                 Public Landing Page
@@ -723,7 +883,7 @@ export default function AdminDashboardPage() {
                   showToast("Signed out successfully", "info");
                   router.push("/login");
                 }}
-                className="w-full flex items-center gap-2 p-2 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-left"
+                className="w-full flex items-center gap-2 p-2 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-left transition-colors"
               >
                 <LogOut className="w-4 h-4" />
                 Sign Out
@@ -742,7 +902,7 @@ export default function AdminDashboardPage() {
               Library Dashboard
             </h1>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Welcome back, Tanvir Ahmed &bull; Live IoT telemetries &amp; desk matrix active
+              Welcome back, {adminName} &bull; Live IoT telemetries &amp; desk matrix active
             </p>
           </div>
 
@@ -790,13 +950,23 @@ export default function AdminDashboardPage() {
               </span>
             </div>
 
-            {/* Profile Avatar */}
+            {/* Profile Avatar with Quick Edit Click */}
             <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
-              <img
-                src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80"
-                alt="Tanvir Ahmed"
-                className="w-10 h-10 rounded-full object-cover ring-2 ring-indigo-500/30"
-              />
+              <button
+                type="button"
+                onClick={handleOpenProfileModal}
+                className="relative group p-0.5 rounded-full focus:outline-none"
+                title="Click to view & edit admin profile"
+              >
+                <img
+                  src={adminAvatar}
+                  alt={adminName}
+                  className="w-10 h-10 rounded-full object-cover ring-2 ring-indigo-500/30 group-hover:ring-indigo-600 group-hover:scale-105 transition-all shadow-sm"
+                />
+                <span className="absolute -bottom-0.5 -right-0.5 p-1 bg-indigo-600 text-white rounded-full border border-white shadow-sm opacity-90 group-hover:opacity-100 group-hover:scale-110 transition-all">
+                  <Edit3 className="w-2.5 h-2.5" />
+                </span>
+              </button>
             </div>
           </div>
         </header>
@@ -1751,6 +1921,206 @@ export default function AdminDashboardPage() {
         onConfirm={handleAssignBooking}
         onClose={() => setAssignBookingSeatId(null)}
       />
+
+      {/* ================= EDIT ADMIN PROFILE MODAL ================= */}
+      {isProfileModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fadeIn">
+          <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5 animate-scaleUp">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                  <UserCheck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight">
+                    Edit Administrator Profile
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Update your display name, designation, contact info, and avatar.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsProfileModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Form */}
+            <form onSubmit={handleSaveProfile} className="space-y-4">
+              {/* Avatar Selector Section */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-2">
+                  Profile Photo &amp; Avatar
+                </label>
+                <div className="flex items-center gap-3.5 p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <img
+                    src={editAvatar}
+                    alt="Preview"
+                    className="w-14 h-14 rounded-2xl object-cover ring-2 ring-indigo-500/30 shrink-0 shadow-sm"
+                  />
+                  <div className="space-y-1.5 flex-1 min-w-0">
+                    <span className="text-[11px] font-semibold text-slate-600 block">
+                      Choose Avatar Preset:
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {[
+                        "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+                        "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80",
+                        "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80",
+                        "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&auto=format&fit=crop&q=80",
+                      ].map((presetUrl, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setEditAvatar(presetUrl)}
+                          className={`w-8 h-8 rounded-xl overflow-hidden border-2 transition-transform hover:scale-105 ${
+                            editAvatar === presetUrl
+                              ? "border-indigo-600 ring-2 ring-indigo-500/40"
+                              : "border-transparent opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img src={presetUrl} alt={`Preset ${idx + 1}`} className="w-full h-full object-cover" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <input
+                    type="url"
+                    value={editAvatar}
+                    onChange={(e) => setEditAvatar(e.target.value)}
+                    placeholder="Or paste custom image URL (https://...)"
+                    className="w-full px-3 py-1.5 text-[11px] rounded-xl bg-slate-50 border border-slate-200 text-slate-700 focus:bg-white focus:outline-none focus:border-indigo-600"
+                  />
+                </div>
+              </div>
+
+              {/* Display Full Name */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Display Full Name <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    placeholder="e.g. Tanvir Ahmed"
+                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600 font-medium"
+                  />
+                </div>
+              </div>
+
+              {/* Admin Email (Read-Only) */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 flex items-center justify-between">
+                  <span>Official Email</span>
+                  <span className="text-[10px] text-slate-400 font-normal">Managed via Auth</span>
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="email"
+                    disabled
+                    value={adminEmail}
+                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-500 cursor-not-allowed font-medium"
+                  />
+                </div>
+              </div>
+
+              {/* Designation & Phone Number */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Designation / Role
+                  </label>
+                  <div className="relative">
+                    <ShieldCheck className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={editDesignation}
+                      onChange={(e) => setEditDesignation(e.target.value)}
+                      placeholder="e.g. Chief Librarian & IoT Admin"
+                      className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Contact Phone
+                  </label>
+                  <div className="relative">
+                    <Phone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={editPhone}
+                      onChange={(e) => setEditPhone(e.target.value)}
+                      placeholder="e.g. +880 1712-345678"
+                      className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600 font-medium"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Office Location */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Office / Desk Location
+                </label>
+                <div className="relative">
+                  <Building className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={editOffice}
+                    onChange={(e) => setEditOffice(e.target.value)}
+                    placeholder="e.g. Central Library (Room 102)"
+                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600 font-medium"
+                  />
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setIsProfileModalOpen(false)}
+                  className="flex-1 py-2.5 px-4 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingProfile}
+                  className="flex-1 py-2.5 px-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-500/20 flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                >
+                  {isSavingProfile ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      Save Changes
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
