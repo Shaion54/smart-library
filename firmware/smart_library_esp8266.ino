@@ -85,15 +85,16 @@ bool seatOccupied[4]          = { false, false, false, false };
 bool lastRawReading[4]        = { false, false, false, false };
 unsigned long lastDebounce[4] = { 0, 0, 0, 0 };
 
-// Buzzer & Sound State (Continuous alert while noise persists)
-int currentThresholdDb        = 30;    // Configured limit (stored in EEPROM, dynamically synced from dashboard)
-volatile bool noiseAlertActive = false; // True as long as sound breaches threshold
+// Buzzer & Sound State (Active for 3 seconds then auto turns off)
+int currentThresholdDb        = 28;    // Configured limit (High sensitivity default 28 dB)
+volatile bool noiseAlertActive = false; // True during the 3-second alert
 bool dashboardAlertActive     = false; // Persists when dashboard triggers an alert
+unsigned long alertStartTime  = 0;     // Timestamp when alert started (auto-turns off after 3000ms)
 unsigned long lastSoundBreachTime = 0; // Timestamp of latest sound detected above threshold
-unsigned long lastNoiseCloudSend  = 0; // Throttle cloud updates while noise is continuous
+unsigned long lastNoiseCloudSend  = 0; // Throttle cloud updates
 bool pendingCloudNoiseSend    = false; // Non-blocking flag for background cloud update
 bool pendingCloudNoiseClear   = false;
-unsigned long adminSilenceLockoutUntil = 0; // Lockout window after admin silences alert (prevents re-trigger loop)
+unsigned long adminSilenceLockoutUntil = 0; // Lockout window preventing re-trigger echo
 
 // Hardware Interrupt for Sound Sensor (Catches microsecond sound spikes instantly)
 volatile bool soundInterruptFired = false;
@@ -204,9 +205,10 @@ void setupWebServer() {
     if (state == "on" || state == "1" || state == "true") {
       dashboardAlertActive = true;
       noiseAlertActive = true;
+      alertStartTime = millis();
       lastSoundBreachTime = millis();
       localServer.send(200, "application/json", "{\"status\":\"alert_active\",\"buzzer\":true}");
-      Serial.println(F("[LAN HTTP] Direct Alert ON command received -> Buzzer sounding!"));
+      Serial.println(F("[LAN HTTP] Direct Alert ON command received -> Buzzer sounding for 3 seconds!"));
     } else {
       dashboardAlertActive = false;
       noiseAlertActive = false;
@@ -444,14 +446,14 @@ void sampleSensors() {
     sendStatusUpdate(true);
   }
 
-  // --- B. Sound Sensor Processing (INSTANT LOCAL ALERT WITH FEEDBACK IMMUNITY) ---
+  // --- B. Ultra-Sensitive Sound Sensor Processing ---
   bool rawPin = digitalRead(PIN_SOUND_DO);
   bool soundPulse = soundInterruptFired || (rawPin == SOUND_TRIGGER_LOGIC);
   if (soundInterruptFired) {
     soundInterruptFired = false; // Reset interrupt latch
   }
 
-  // Admin Silence Lockout: if admin recently clicked Silence on dashboard, pause re-trigger for 4 seconds
+  // Grace period lockout: pause microphone re-triggering for 1.5s after alert ends
   if (now < adminSilenceLockoutUntil) {
     soundPulse = false;
   }
@@ -462,29 +464,31 @@ void sampleSensors() {
   // Breach Condition: sound detected by LM393 OR dashboard manual alert
   bool isBreaching = soundPulse || dashboardAlertActive;
 
-  if (isBreaching) {
+  // 1. Alert ON: Triggers immediately on any slight sound pulse!
+  if (isBreaching && !noiseAlertActive) {
+    noiseAlertActive = true;
+    alertStartTime = now;
     lastSoundBreachTime = now;
+    Serial.print(F("[Noise] Sensitive sound breach detected ("));
+    Serial.print(estimatedDb);
+    Serial.println(F(" dB) -> Alert ON (Sounding for 3 seconds)!"));
 
-    // --- ALERT ON: Turn Buzzer ON immediately ---
-    if (!noiseAlertActive) {
-      noiseAlertActive = true;
-      Serial.print(F("[Noise] Noise detected ("));
-      Serial.print(estimatedDb);
-      Serial.println(F(" dB) -> Alert ON (Buzzer sounding)!"));
+    // Schedule background cloud update
+    pendingCloudNoiseSend = true;
+    lastNoiseCloudSend = now;
+  }
 
-      // Schedule cloud update
-      pendingCloudNoiseSend = true;
-      lastNoiseCloudSend = now;
-    }
-  } else {
-    // --- ALERT OFF: When quiet for 1.2s and dashboard not locking, turn Buzzer OFF ---
-    if (noiseAlertActive && !dashboardAlertActive && (now - lastSoundBreachTime >= 1200)) {
-      noiseAlertActive = false;
-      digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
-      setStatusLed(false);
-      Serial.println(F("[Noise] Quiet restored -> Alert OFF (Buzzer stopped)."));
-      pendingCloudNoiseClear = true;
-    }
+  // 2. Alert OFF: Automatically turns OFF exactly after 3 seconds!
+  if (noiseAlertActive && (now - alertStartTime >= 3000)) {
+    noiseAlertActive = false;
+    dashboardAlertActive = false;
+    adminSilenceLockoutUntil = now + 1500; // 1.5-second echo grace period
+    soundInterruptFired = false;
+    digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
+    setStatusLed(false);
+    Serial.println(F("[Noise] 3 seconds complete -> Alert auto-turned OFF!"));
+
+    pendingCloudNoiseClear = true;
   }
 }
 
