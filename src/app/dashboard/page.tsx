@@ -37,7 +37,35 @@ import {
   Check,
   Shield,
   Layers,
+  Volume2,
+  AlertTriangle,
 } from "lucide-react";
+
+// Web Audio synthesizer for alert chime
+function playStudentAlertChime() {
+  if (typeof window === "undefined") return;
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const now = ctx.currentTime;
+    [0, 0.15].forEach((offset) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(660, now + offset);
+      gain.gain.setValueAtTime(0, now + offset);
+      gain.gain.linearRampToValueAtTime(0.2, now + offset + 0.01);
+      gain.gain.linearRampToValueAtTime(0, now + offset + 0.1);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.11);
+    });
+  } catch {}
+}
 
 function StudentDashboardContent() {
   const router = useRouter();
@@ -76,6 +104,7 @@ function StudentDashboardContent() {
 
   const [cancelModalReservation, setCancelModalReservation] = useState<{ id: string; seatId: string } | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isNoiseModalOpen, setIsNoiseModalOpen] = useState(false);
 
   // Automatically pop open the booking modal if user just logged in to book this seat
   useEffect(() => {
@@ -291,6 +320,15 @@ function StudentDashboardContent() {
     const elapsed = Date.now() - new Date(device.noise_warning_updated_at).getTime();
     return !isNaN(elapsed) && elapsed < 5 * 60 * 1000;
   }, [device?.noise_warning_active, device?.noise_warning_updated_at]);
+
+  useEffect(() => {
+    if (isFreshNoiseAlert) {
+      setIsNoiseModalOpen(true);
+      playStudentAlertChime();
+    } else {
+      setIsNoiseModalOpen(false);
+    }
+  }, [isFreshNoiseAlert]);
 
   const defaultSeatList: Seat[] = [
     { id: "S01", seat_number: 1, is_occupied: true, is_maintenance: false, last_occupied_change: "", created_at: "", updated_at: "" },
@@ -739,6 +777,38 @@ function StudentDashboardContent() {
         onConfirm={handleConfirmCancelReservation}
         onClose={() => setCancelModalReservation(null)}
       />
+
+      {/* ================= STUDENT QUIET ZONE NOISE ALERT POPUP MODAL ================= */}
+      {isNoiseModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-fadeIn">
+          <div className="relative w-full max-w-sm bg-white border border-rose-300 rounded-3xl p-6 shadow-2xl text-center space-y-4 animate-scaleUp">
+            <div className="w-14 h-14 rounded-2xl bg-rose-50 text-rose-600 border border-rose-200 flex items-center justify-center mx-auto shadow-sm">
+              <Volume2 className="w-7 h-7 animate-bounce text-rose-600" />
+            </div>
+
+            <div className="space-y-1">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-black uppercase">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Quiet Sanctuary Notice</span>
+              </div>
+              <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                শব্দ সীমা অতিক্রান্ত হয়েছে!
+              </h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                লাইব্রেরি হলের অ্যাকোস্টিক সেন্সরে অতিরিক্ত শব্দ শনাক্ত হয়েছে। অনুগ্রহ করে শান্ত পরিবেশ বজায় রাখুন।
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsNoiseModalOpen(false)}
+              className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-500/20 transition-all active:scale-95"
+            >
+              বুঝেছি / শান্ত পরিবেশ বজায় রাখব
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

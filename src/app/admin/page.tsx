@@ -184,6 +184,7 @@ export default function AdminDashboardPage() {
   const [isTriggeringAlert, setIsTriggeringAlert] = useState<boolean>(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
+  const [isNoisePopupOpen, setIsNoisePopupOpen] = useState<boolean>(false);
 
   // Seat management modals
   const [maintenanceModal, setMaintenanceModal] = useState<{ seatId: string; currentState: boolean } | null>(null);
@@ -372,18 +373,22 @@ export default function AdminDashboardPage() {
         const warning = Boolean(deviceData.noise_warning_active);
         setIsAlertActive((prev) => {
           if (!prev && warning) {
+            setIsNoisePopupOpen(true);
             playBrowserBuzzerBeep();
             showToast("🚨 ACOUSTIC ALERT: Hardware sensor detected noise spike (> limit) in library!", "error");
           }
           return warning;
         });
+        if (!warning) {
+          setIsNoisePopupOpen(false);
+        }
       }
     } catch {
       console.warn("Using sample mock telemetry on admin dashboard");
     } finally {
       setLoading(false);
     }
-  }, [supabase]);
+  }, [supabase, showToast]);
 
   // Load persistent noise settings ONCE on initial mount so it never overrides user dragging
   useEffect(() => {
@@ -412,6 +417,7 @@ export default function AdminDashboardPage() {
   const handleTriggerNoiseAlert = useCallback(
     async (currentDb?: number, customDetails?: string) => {
       setIsAlertActive(true);
+      setIsNoisePopupOpen(true);
       const dbToLog = currentDb || 78;
       if (currentDb) {
         setLiveDb(currentDb);
@@ -441,6 +447,7 @@ export default function AdminDashboardPage() {
   // Restore Quiet Sanctuary Normal in Database & stop hardware buzzer
   const handleClearNoiseAlert = useCallback(async () => {
     setIsAlertActive(false);
+    setIsNoisePopupOpen(false);
     const calmDb = Math.min(26, Math.max(22, soundThreshold - 4));
     setLiveDb(calmDb);
 
@@ -549,14 +556,21 @@ export default function AdminDashboardPage() {
       .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, (payload) => {
         loadData();
         if (payload.new && (payload.new as Device).noise_warning_active) {
+          setIsAlertActive(true);
+          setIsNoisePopupOpen(true);
           playBrowserBuzzerBeep();
           showToast("⚠️ Acoustic Noise Limit Breached! Hardware buzzer sounding.", "error");
+        } else if (payload.new && !(payload.new as Device).noise_warning_active) {
+          setIsAlertActive(false);
+          setIsNoisePopupOpen(false);
         }
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "reservations" }, () => loadData())
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "noise_logs" }, (payload) => {
         loadData();
         if (payload.new && (payload.new as NoiseLog).noise_detected) {
+          setIsAlertActive(true);
+          setIsNoisePopupOpen(true);
           playBrowserBuzzerBeep();
           showToast("⚠️ Noise spike logged by library acoustic sensor!", "error");
         }
@@ -721,6 +735,7 @@ export default function AdminDashboardPage() {
     setIsTriggeringAlert(true);
     setLiveDb(78);
     setIsAlertActive(true);
+    setIsNoisePopupOpen(true);
 
     // Audible buzzer alert in user's browser
     playBrowserBuzzerBeep();
@@ -2151,6 +2166,100 @@ export default function AdminDashboardPage() {
         onConfirm={handleAssignBooking}
         onClose={() => setAssignBookingSeatId(null)}
       />
+
+      {/* ================= EMERGENCY NOISE ALERT POPUP MODAL WITH SOUND ================= */}
+      {isNoisePopupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm animate-fadeIn">
+          <div className="relative w-full max-w-md bg-white border-2 border-rose-500 rounded-3xl p-6 sm:p-7 shadow-2xl shadow-rose-950/40 text-center space-y-5 animate-scaleUp ring-4 ring-rose-500/20">
+            {/* Pulsing Alarm Icon & Waves */}
+            <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+              <span className="absolute inset-0 rounded-full bg-rose-500/20 animate-ping" />
+              <span className="absolute inset-2 rounded-full bg-rose-500/30 animate-pulse" />
+              <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-tr from-rose-600 to-red-500 text-white flex items-center justify-center shadow-lg shadow-rose-600/40">
+                <Volume2 className="w-9 h-9 animate-bounce text-white" />
+              </div>
+            </div>
+
+            {/* Alert Headings */}
+            <div className="space-y-1.5">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-100 text-rose-700 text-xs font-black uppercase tracking-wider">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Noise Limit Breached!</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                শব্দ শনাক্ত হয়েছে! (Acoustic Alert)
+              </h2>
+              <p className="text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
+                লাইব্রেরির শান্ত পরিবেশের নির্ধারিত সীমা অতিক্রান্ত হয়েছে। ESP8266 হার্ডওয়্যার বাজার বেজে উঠেছে!
+              </p>
+            </div>
+
+            {/* Decibel Metric Display */}
+            <div className="bg-rose-50/70 border border-rose-200/80 rounded-2xl p-4 flex items-center justify-around gap-4">
+              <div className="text-center">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  Current Noise
+                </span>
+                <span className="text-3xl sm:text-4xl font-black font-mono text-rose-600 tracking-tight block">
+                  {liveDb} <span className="text-sm font-normal text-slate-500">dB</span>
+                </span>
+                <span className="text-[10px] font-bold text-rose-700">Level Breached</span>
+              </div>
+
+              <div className="h-10 w-px bg-rose-200" />
+
+              <div className="text-center">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  Configured Limit
+                </span>
+                <span className="text-3xl sm:text-4xl font-black font-mono text-slate-700 tracking-tight block">
+                  {soundThreshold} <span className="text-sm font-normal text-slate-500">dB</span>
+                </span>
+                <span className="text-[10px] font-semibold text-slate-500">Quiet Zone Standard</span>
+              </div>
+            </div>
+
+            {/* Audio alarm status & Mute toggle */}
+            <div className="flex items-center justify-between px-3 py-2 bg-slate-50 rounded-xl border border-slate-200/80 text-xs text-slate-600">
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${isAudioMuted ? "bg-slate-400" : "bg-emerald-500 animate-ping"}`} />
+                <span className="font-semibold text-slate-700">
+                  {isAudioMuted ? "Browser Audio Muted" : "Web Alarm Sounding"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAudioMuted(!isAudioMuted)}
+                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+              >
+                {isAudioMuted ? "Unmute Sound" : "Mute Sound"}
+              </button>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-2.5 pt-1">
+              {/* Primary: Silence Hardware Buzzer & Reset */}
+              <button
+                type="button"
+                onClick={handleClearNoiseAlert}
+                className="w-full py-3.5 px-4 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-700 hover:to-red-700 text-white rounded-xl text-xs font-black shadow-lg shadow-rose-600/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+              >
+                <Check className="w-4 h-4 text-white" />
+                <span>Silence Hardware Buzzer (বাজার বন্ধ করুন)</span>
+              </button>
+
+              {/* Secondary: Acknowledge & Close popup */}
+              <button
+                type="button"
+                onClick={() => setIsNoisePopupOpen(false)}
+                className="w-full py-2.5 px-4 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-bold transition-colors"
+              >
+                Dismiss Popup (পপআপ বন্ধ রাখুন)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ================= EDIT ADMIN PROFILE MODAL ================= */}
       {isProfileModalOpen && (
