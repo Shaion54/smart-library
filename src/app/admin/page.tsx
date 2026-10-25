@@ -71,6 +71,7 @@ import {
   Phone,
   Building,
   X,
+  Menu,
 } from "lucide-react";
 
 // Duration formatter for historical reservations
@@ -107,35 +108,53 @@ function formatBookingDate(isoString?: string): string {
   }
 }
 
-// Synthesize rapid bip.bip.bip audio alert directly in browser via Web Audio API
-function playBrowserBuzzerBeep() {
-  if (typeof window === "undefined") return;
+// Shared audio context singleton for seamless web browser buzzer alarms
+let globalAudioCtx: AudioContext | null = null;
+
+function getAudioContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
   try {
     const AudioContextClass =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
+    if (!AudioContextClass) return null;
+    if (!globalAudioCtx) {
+      globalAudioCtx = new AudioContextClass();
+    }
+    if (globalAudioCtx.state === "suspended") {
+      globalAudioCtx.resume().catch(() => {});
+    }
+    return globalAudioCtx;
+  } catch {
+    return null;
+  }
+}
 
-    // 3 rapid pulses matching the hardware buzzer (880Hz square tone)
-    const pulses = [0, 0.15, 0.30];
-    pulses.forEach((time) => {
+// Synthesize rapid bip.bip.bip audio alert directly in browser via Web Audio API
+function playBrowserBuzzerBeep() {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  try {
+    const now = ctx.currentTime;
+    // 3 rapid sharp pulses matching the hardware buzzer (880Hz square tone)
+    const pulses = [0, 0.13, 0.26];
+    pulses.forEach((timeOffset) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
       osc.type = "square";
-      osc.frequency.setValueAtTime(880, ctx.currentTime + time);
+      osc.frequency.setValueAtTime(880, now + timeOffset);
 
-      gain.gain.setValueAtTime(0, ctx.currentTime + time);
-      gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + time + 0.01);
-      gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + time + 0.07);
-      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + time + 0.08);
+      gain.gain.setValueAtTime(0, now + timeOffset);
+      gain.gain.linearRampToValueAtTime(0.3, now + timeOffset + 0.01);
+      gain.gain.linearRampToValueAtTime(0.3, now + timeOffset + 0.07);
+      gain.gain.linearRampToValueAtTime(0, now + timeOffset + 0.08);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
-      osc.start(ctx.currentTime + time);
-      osc.stop(ctx.currentTime + time + 0.09);
+      osc.start(now + timeOffset);
+      osc.stop(now + timeOffset + 0.09);
     });
   } catch (e) {
     console.warn("Browser audio synthesizer error:", e);
@@ -163,6 +182,8 @@ export default function AdminDashboardPage() {
   const [soundMode, setSoundMode] = useState<"strict" | "standard" | "relaxed">("strict");
   const [isAlertActive, setIsAlertActive] = useState<boolean>(false);
   const [isTriggeringAlert, setIsTriggeringAlert] = useState<boolean>(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+  const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
 
   // Seat management modals
   const [maintenanceModal, setMaintenanceModal] = useState<{ seatId: string; currentState: boolean } | null>(null);
@@ -199,6 +220,31 @@ export default function AdminDashboardPage() {
   const [now, setNow] = useState(Date.now());
 
   const supabase = createClient();
+
+  // Unlock Web Audio context on first user interaction anywhere on the screen
+  useEffect(() => {
+    const unlockAudio = () => {
+      getAudioContext();
+    };
+    window.addEventListener("click", unlockAudio, { once: true });
+    window.addEventListener("touchstart", unlockAudio, { once: true });
+    return () => {
+      window.removeEventListener("click", unlockAudio);
+      window.removeEventListener("touchstart", unlockAudio);
+    };
+  }, []);
+
+  // Continuous audible alert loop when noise is detected in the quiet zone
+  useEffect(() => {
+    if (!isAlertActive || isAudioMuted) return;
+    // Play alert sound immediately
+    playBrowserBuzzerBeep();
+    // Repeat alert buzzer sound every 2.8 seconds until silenced or normalized
+    const buzzerInterval = setInterval(() => {
+      playBrowserBuzzerBeep();
+    }, 2800);
+    return () => clearInterval(buzzerInterval);
+  }, [isAlertActive, isAudioMuted]);
 
   useEffect(() => {
     setMounted(true);
@@ -321,11 +367,16 @@ export default function AdminDashboardPage() {
         .single();
 
       if (seatsData && seatsData.length > 0) setSeats(seatsData);
-      if (resData) setReservations(resData);
       if (deviceData) {
         setDevice(deviceData);
         const warning = Boolean(deviceData.noise_warning_active);
-        setIsAlertActive(warning);
+        setIsAlertActive((prev) => {
+          if (!prev && warning) {
+            playBrowserBuzzerBeep();
+            showToast("🚨 ACOUSTIC ALERT: Hardware sensor detected noise spike (> limit) in library!", "error");
+          }
+          return warning;
+        });
       }
     } catch {
       console.warn("Using sample mock telemetry on admin dashboard");
@@ -495,9 +546,21 @@ export default function AdminDashboardPage() {
     const channel = supabase
       .channel("admin-dashboard-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "seats" }, () => loadData())
-      .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, () => loadData())
+      .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, (payload) => {
+        loadData();
+        if (payload.new && (payload.new as Device).noise_warning_active) {
+          playBrowserBuzzerBeep();
+          showToast("⚠️ Acoustic Noise Limit Breached! Hardware buzzer sounding.", "error");
+        }
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "reservations" }, () => loadData())
-      .on("postgres_changes", { event: "*", schema: "public", table: "noise_logs" }, () => loadData())
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "noise_logs" }, (payload) => {
+        loadData();
+        if (payload.new && (payload.new as NoiseLog).noise_detected) {
+          playBrowserBuzzerBeep();
+          showToast("⚠️ Noise spike logged by library acoustic sensor!", "error");
+        }
+      })
       .subscribe();
 
     // High frequency 1-second live telemetry poll
@@ -746,8 +809,8 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#F4F6FB] flex text-slate-800 font-sans antialiased">
-      {/* ================= LEFT SIDEBAR (SMART LIBRARY COMMAND CENTER) ================= */}
-      <aside className="w-64 bg-[#3C2AB9] text-white flex flex-col justify-between shrink-0 shadow-2xl relative z-30 select-none">
+      {/* ================= LEFT SIDEBAR (DESKTOP) ================= */}
+      <aside className="hidden lg:flex w-64 bg-[#3C2AB9] text-white flex-col justify-between shrink-0 shadow-2xl relative z-30 select-none">
         <div>
           {/* Brand Logo & Title */}
           <div className="p-6 pb-5 flex items-center justify-between border-b border-indigo-400/20">
@@ -893,41 +956,141 @@ export default function AdminDashboardPage() {
         </div>
       </aside>
 
+      {/* ================= MOBILE SIDEBAR DRAWER OVERLAY ================= */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden flex">
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs transition-opacity"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+          {/* Drawer Content */}
+          <aside className="relative w-72 max-w-[85vw] bg-[#3C2AB9] text-white flex flex-col justify-between h-full shadow-2xl z-10 select-none animate-in slide-in-from-left duration-200">
+            <div>
+              <div className="p-5 flex items-center justify-between border-b border-indigo-400/20">
+                <Link href="/" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white/10 backdrop-blur-md flex items-center justify-center text-white border border-white/20 shadow-sm">
+                    <BookOpen className="w-6 h-6 text-white" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-extrabold text-lg tracking-tight text-white leading-tight">SmartLib</span>
+                    <span className="text-[10px] text-indigo-200 font-medium">Smart Library ERP</span>
+                  </div>
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors"
+                  aria-label="Close menu"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <nav className="p-3.5 space-y-1 max-h-[calc(100vh-170px)] overflow-y-auto">
+                {sidebarItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeMenu === item.name;
+                  return (
+                    <button
+                      key={item.name}
+                      onClick={() => {
+                        setActiveMenu(item.name);
+                        setIsMobileMenuOpen(false);
+                        if (item.name === "Admin Profile") {
+                          handleOpenProfileModal();
+                        } else if (item.name === "Desk Matrix" || item.name === "Presence & Walk-Ins" || item.name === "Active Bookings") {
+                          document.getElementById("desk-matrix-section")?.scrollIntoView({ behavior: "smooth" });
+                        } else if (item.name === "Acoustic Decibel" || item.name === "Noise Alerts") {
+                          document.getElementById("noise-monitor-section")?.scrollIntoView({ behavior: "smooth" });
+                        } else if (item.name === "Booking History") {
+                          document.getElementById("booking-history-section")?.scrollIntoView({ behavior: "smooth" });
+                        }
+                      }}
+                      className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-xs font-semibold transition-all ${
+                        isActive
+                          ? "bg-[#5A45F3] text-white shadow-md font-bold"
+                          : "text-indigo-200/80 hover:text-white hover:bg-white/10"
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 ${isActive ? "text-white" : "text-indigo-300"}`} />
+                      <span>{item.name}</span>
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+
+            <div className="p-4 border-t border-indigo-400/20">
+              <div
+                onClick={() => {
+                  setIsMobileMenuOpen(false);
+                  handleOpenProfileModal();
+                }}
+                className="flex items-center gap-2.5 p-2.5 rounded-2xl bg-white/10 hover:bg-white/15 cursor-pointer transition-all border border-white/10"
+              >
+                <img
+                  src={adminAvatar}
+                  alt={adminName}
+                  className="w-9 h-9 rounded-full object-cover border-2 border-indigo-300"
+                />
+                <div className="flex flex-col text-left truncate flex-1 min-w-0">
+                  <span className="text-xs font-bold text-white truncate">{adminName}</span>
+                  <span className="text-[10px] text-indigo-200 truncate">{adminDesignation}</span>
+                </div>
+                <Edit3 className="w-3.5 h-3.5 text-indigo-200 shrink-0" />
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
       {/* ================= MAIN CONTENT AREA ================= */}
       <main className="flex-1 flex flex-col h-screen overflow-y-auto">
         {/* TOP HEADER BAR */}
-        <header className="sticky top-0 z-20 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-8 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight leading-tight">
-              Library Dashboard
-            </h1>
-            <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Welcome back, {adminName} &bull; Live IoT telemetries &amp; desk matrix active
-            </p>
+        <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="lg:hidden p-2 -ml-1 rounded-xl text-slate-700 hover:text-indigo-600 hover:bg-slate-100 transition-colors shrink-0"
+              aria-label="Open mobile navigation"
+            >
+              <Menu className="w-5 h-5 sm:w-6 sm:h-6" />
+            </button>
+            <div className="truncate">
+              <h1 className="text-base sm:text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-tight truncate">
+                Library Dashboard
+              </h1>
+              <p className="text-[11px] sm:text-xs text-slate-500 font-medium mt-0.5 hidden sm:block truncate">
+                Welcome back, {adminName} &bull; Live IoT telemetries &amp; desk matrix active
+              </p>
+            </div>
           </div>
 
           {/* Search bar, notifications & avatar */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-3.5 shrink-0">
             {/* Live Hardware Online/Offline Pill with Toggle */}
             <button
               onClick={handleToggleHardwareOnline}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl border text-xs font-bold transition-all shadow-xs ${
+              className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3.5 py-1.5 rounded-xl border text-[11px] sm:text-xs font-bold transition-all shadow-xs ${
                 online
                   ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
                   : "bg-rose-50 text-rose-800 border-rose-300 hover:bg-rose-100 animate-pulse"
               }`}
               title="Click to toggle hardware Online / Offline in database"
             >
-              <span className={`w-2 h-2 rounded-full ${online ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
-              <span>Hardware Hub: <strong>{online ? "ONLINE" : "OFFLINE"}</strong></span>
+              <span className={`w-2 h-2 rounded-full shrink-0 ${online ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+              <span className="hidden sm:inline">Hardware Hub: </span>
+              <strong>{online ? "ONLINE" : "OFFLINE"}</strong>
             </button>
 
             {/* Search Input */}
-            <div className="relative w-64 hidden sm:block">
+            <div className="relative w-44 lg:w-64 hidden md:block">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Search desk, reservation, student..."
+                placeholder="Search desk, student..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:border-indigo-600 transition-colors"
@@ -939,11 +1102,11 @@ export default function AdminDashboardPage() {
               onClick={() => {
                 document.getElementById("noise-monitor-section")?.scrollIntoView({ behavior: "smooth" });
               }}
-              className="relative cursor-pointer p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-slate-100 transition-colors"
+              className="relative cursor-pointer p-1.5 sm:p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-slate-100 transition-colors"
               title={isAlertActive ? "Noise alert active!" : "System notifications"}
             >
               <Bell className="w-5 h-5" />
-              <span className={`absolute top-1.5 right-1.5 w-4 h-4 rounded-full text-white text-[9px] font-black flex items-center justify-center ring-2 ring-white ${
+              <span className={`absolute top-1 right-1 w-4 h-4 rounded-full text-white text-[9px] font-black flex items-center justify-center ring-2 ring-white ${
                 isAlertActive ? "bg-rose-500 animate-ping" : "bg-[#5A45F3]"
               }`}>
                 {isAlertActive ? "!" : "3"}
@@ -951,7 +1114,7 @@ export default function AdminDashboardPage() {
             </div>
 
             {/* Profile Avatar with Quick Edit Click */}
-            <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+            <div className="flex items-center gap-2 pl-1 sm:pl-2 border-l border-slate-200">
               <button
                 type="button"
                 onClick={handleOpenProfileModal}
@@ -961,18 +1124,55 @@ export default function AdminDashboardPage() {
                 <img
                   src={adminAvatar}
                   alt={adminName}
-                  className="w-10 h-10 rounded-full object-cover ring-2 ring-indigo-500/30 group-hover:ring-indigo-600 group-hover:scale-105 transition-all shadow-sm"
+                  className="w-8 h-8 sm:w-10 sm:h-10 rounded-full object-cover ring-2 ring-indigo-500/30 group-hover:ring-indigo-600 transition-all shadow-sm"
                 />
-                <span className="absolute -bottom-0.5 -right-0.5 p-1 bg-indigo-600 text-white rounded-full border border-white shadow-sm opacity-90 group-hover:opacity-100 group-hover:scale-110 transition-all">
-                  <Edit3 className="w-2.5 h-2.5" />
+                <span className="absolute -bottom-0.5 -right-0.5 p-0.5 sm:p-1 bg-indigo-600 text-white rounded-full border border-white shadow-sm opacity-90 group-hover:opacity-100 transition-all">
+                  <Edit3 className="w-2 h-2 sm:w-2.5 sm:h-2.5" />
                 </span>
               </button>
             </div>
           </div>
         </header>
 
+        {/* EMERGENCY NOISE ALERT AUDIBLE & VISUAL BANNER */}
+        {isAlertActive && (
+          <div className="bg-gradient-to-r from-rose-600 via-rose-700 to-rose-600 text-white px-4 py-2.5 sm:py-3 shadow-lg flex flex-wrap items-center justify-between gap-3 text-xs font-bold sticky top-[53px] sm:top-[69px] z-30 border-b border-rose-800 animate-pulse">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="p-1.5 bg-white/20 rounded-lg shrink-0">
+                <AlertTriangle className="w-4 h-4 text-white animate-bounce" />
+              </span>
+              <div className="truncate">
+                <span className="uppercase tracking-wider font-extrabold text-rose-100 mr-2">
+                  🚨 NOISE BREACH DETECTED:
+                </span>
+                <span className="text-white/95">
+                  Microphone sensor registered noise exceeding {soundThreshold} dB limit in Quiet Zone!
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-auto">
+              <button
+                type="button"
+                onClick={() => setIsAudioMuted(!isAudioMuted)}
+                className="px-2.5 py-1 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors flex items-center gap-1.5 text-[11px]"
+                title={isAudioMuted ? "Unmute web alert audio" : "Mute web alert audio"}
+              >
+                {isAudioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
+                <span>{isAudioMuted ? "Audio Muted" : "Mute Alarm"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleClearNoiseAlert}
+                className="px-3 py-1 bg-white text-rose-700 hover:bg-rose-50 rounded-lg transition-all shadow-sm text-[11px] font-black"
+              >
+                Silence Hardware Buzzer
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* INNER SCROLLABLE CONTENT */}
-        <div className="p-8 space-y-7 max-w-7xl w-full mx-auto">
+        <div className="p-3.5 sm:p-6 lg:p-8 space-y-5 sm:space-y-7 max-w-7xl w-full mx-auto">
           {/* Top Noise Alert Warning Banner (Visible immediately across the screen) */}
           <NoiseAlertBanner
             isNoiseWarningActive={isAlertActive}
@@ -1561,7 +1761,10 @@ export default function AdminDashboardPage() {
 
             {/* Table of Desks with Start Time, End Time & Hour:Min:Sec Countdowns */}
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
-              <table className="w-full text-left text-xs text-slate-700">
+              <div className="sm:hidden px-3 py-1.5 bg-slate-50 text-[10px] text-slate-500 font-medium text-center border-b border-slate-200">
+                &larr; Swipe sideways to view all desk telemetry &amp; controls &rarr;
+              </div>
+              <table className="w-full min-w-[700px] text-left text-xs text-slate-700">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[11px] uppercase tracking-wider">
                   <tr>
                     <th className="py-3 px-4">Desk ID</th>
@@ -1775,7 +1978,10 @@ export default function AdminDashboardPage() {
 
             {/* Table of Historical Bookings */}
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
-              <table className="w-full text-left text-xs text-slate-700">
+              <div className="sm:hidden px-3 py-1.5 bg-slate-50 text-[10px] text-slate-500 font-medium text-center border-b border-slate-200">
+                &larr; Swipe sideways to view complete reservation audit details &rarr;
+              </div>
+              <table className="w-full min-w-[800px] text-left text-xs text-slate-700">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[11px] uppercase tracking-wider">
                   <tr>
                     <th className="py-3 px-4">Booking Ref</th>
@@ -1882,6 +2088,30 @@ export default function AdminDashboardPage() {
             </div>
           </div>
         </div>
+
+        {/* FLOATING ACTION PILL ON MOBILE & DESKTOP WHEN NOISE ALERT IS ACTIVE */}
+        {isAlertActive && (
+          <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-40 flex items-center gap-2.5 p-3 sm:p-3.5 bg-rose-600 text-white rounded-2xl shadow-2xl border-2 border-white animate-bounce max-w-[92vw]">
+            <div className="p-2 bg-white/20 rounded-xl shrink-0">
+              <Volume2 className="w-5 h-5 text-white animate-pulse" />
+            </div>
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs font-black leading-tight uppercase tracking-tight text-white">
+                NOISE SPIKE DETECTED
+              </span>
+              <span className="text-[11px] text-rose-100 truncate">
+                {liveDb} dB breached {soundThreshold} dB limit
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleClearNoiseAlert}
+              className="ml-2 px-3 py-1.5 bg-white text-rose-700 hover:bg-rose-50 rounded-xl text-xs font-black shadow-sm transition-transform active:scale-95 shrink-0"
+            >
+              Silence
+            </button>
+          </div>
+        )}
       </main>
 
       {/* Confirmation Modal for Cancellation */}
@@ -1924,8 +2154,8 @@ export default function AdminDashboardPage() {
 
       {/* ================= EDIT ADMIN PROFILE MODAL ================= */}
       {isProfileModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fadeIn">
-          <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5 animate-scaleUp">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fadeIn overflow-y-auto">
+          <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-3xl p-5 sm:p-7 shadow-2xl space-y-5 animate-scaleUp max-h-[92vh] overflow-y-auto">
             {/* Modal Header */}
             <div className="flex items-start justify-between border-b border-slate-100 pb-4">
               <div className="flex items-center gap-3">

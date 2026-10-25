@@ -601,6 +601,7 @@ void sendStatusUpdate(bool force) {
   payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
   payload += "\"firmware_version\":\"" + String(FIRMWARE_VER) + "\",";
   payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
+  payload += "\"noise_detected\":" + String(noiseAlertActive ? "true" : "false") + ",";
   payload += "\"seats\":[";
   for (int i = 0; i < 4; i++) {
     payload += "{\"id\":\"" + String(SEAT_IDS[i]) + "\",\"is_occupied\":" + (seatOccupied[i] ? "true" : "false") + "}";

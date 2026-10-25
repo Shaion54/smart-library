@@ -17,6 +17,8 @@ const statusSchema = z.object({
   ).min(1).max(4),
   firmware_version: z.string().max(20).optional(),
   ip_address: z.string().max(50).optional(),
+  noise_detected: z.boolean().optional(),
+  sound_level_db: z.number().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -42,7 +44,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { device_id, seats, firmware_version, ip_address } = parsed.data;
+  const { device_id, seats, firmware_version, ip_address, noise_detected } = parsed.data;
 
   try {
     const supabase = createAdminClient();
@@ -59,6 +61,12 @@ export async function POST(req: NextRequest) {
           is_online: true,
           ...(firmware_version ? { firmware_version } : {}),
           ...(ip_address ? { ip_address } : {}),
+          ...(noise_detected !== undefined
+            ? {
+                noise_warning_active: noise_detected,
+                noise_warning_updated_at: nowIso,
+              }
+            : {}),
         },
         { onConflict: "id" }
       )
