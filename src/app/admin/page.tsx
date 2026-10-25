@@ -349,10 +349,14 @@ export default function AdminDashboardPage() {
     return () => clearInterval(buzzerInterval);
   }, [isAlertActive, isAudioMuted]);
 
-  // Auto-turn OFF alert and close popup modal automatically after 3 seconds in browser
+  // Auto-turn OFF alert and close popup modal automatically after 3 seconds in browser (unless threshold is set below ambient sound)
   useEffect(() => {
     if (!isAlertActive) return;
     const autoDismissTimer = setTimeout(() => {
+      // If ambient sound currently violates threshold (e.g. threshold set to <= 25 while ambient is 26 dB), stay active!
+      if (liveDb > soundThreshold) {
+        return;
+      }
       setIsAlertActive(false);
       setIsNoisePopupOpen(false);
       // Clean up in DB so hardware & other clients also normalize
@@ -367,7 +371,7 @@ export default function AdminDashboardPage() {
       }).catch(() => {});
     }, 3000);
     return () => clearTimeout(autoDismissTimer);
-  }, [isAlertActive]);
+  }, [isAlertActive, liveDb, soundThreshold]);
 
   useEffect(() => {
     setMounted(true);
@@ -617,6 +621,16 @@ export default function AdminDashboardPage() {
       fetch(`http://${device.ip_address}/threshold?val=${val}`).catch(() => {});
     }
 
+    // Instant breach detection: if threshold is lowered below current ambient sound (~26 dB):
+    if (liveDb > val) {
+      handleTriggerNoiseAlert(
+        liveDb,
+        `Threshold lowered to ${val} dB (below current ambient library level ${liveDb} dB)!`
+      );
+    } else if (isAlertActive && liveDb <= val) {
+      // If threshold is raised back above ambient sound, normalize and silence alert
+      handleClearNoiseAlert();
+    }
   };
 
   // Live decibel wave display (reflects real ambient sound ~24-27 dB, or smooth decay after spike test)

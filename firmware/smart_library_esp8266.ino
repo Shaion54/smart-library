@@ -231,7 +231,15 @@ void setupWebServer() {
         localServer.send(200, "application/json", "{\"status\":\"ok\",\"threshold\":" + String(currentThresholdDb) + "}");
         Serial.print(F("[LAN HTTP] Noise threshold updated via LAN to: "));
         Serial.print(currentThresholdDb);
-        Serial.println(F(" dB"));
+        Serial.println(F(" dB (Saved to EEPROM)"));
+
+        // If threshold was raised above ambient (>= 26 dB), normalize immediately!
+        if (currentThresholdDb >= 26 && !dashboardAlertActive) {
+          noiseAlertActive = false;
+          digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
+          setStatusLed(false);
+          pendingCloudNoiseClear = true;
+        }
         return;
       }
     }
@@ -459,36 +467,44 @@ void sampleSensors() {
   }
 
   // Realistic Decibel Estimation:
-  int estimatedDb = soundPulse ? max(currentThresholdDb + 15, 75) : 25;
+  int estimatedDb = soundPulse ? max(currentThresholdDb + 15, 75) : 26;
 
-  // Breach Condition: sound detected by LM393 OR dashboard manual alert
-  bool isBreaching = soundPulse || dashboardAlertActive;
+  // Ambient breach: if threshold is lowered to 25 dB or below, quiet ambient (26 dB) breaches threshold!
+  bool isAmbientBreach = (26 > currentThresholdDb);
 
-  // 1. Alert ON: Triggers immediately on any slight sound pulse!
+  // Breach Condition: sound detected by LM393 OR threshold below ambient OR dashboard manual alert
+  bool isBreaching = soundPulse || isAmbientBreach || dashboardAlertActive;
+
+  // 1. Alert ON: Triggers immediately on any slight sound OR if threshold is set below ambient!
   if (isBreaching && !noiseAlertActive) {
     noiseAlertActive = true;
     alertStartTime = now;
     lastSoundBreachTime = now;
-    Serial.print(F("[Noise] Sensitive sound breach detected ("));
-    Serial.print(estimatedDb);
-    Serial.println(F(" dB) -> Alert ON (Sounding for 3 seconds)!"));
+    Serial.print(F("[Noise] Breach triggered ("));
+    Serial.print(isAmbientBreach ? 26 : estimatedDb);
+    Serial.print(F(" dB vs limit "));
+    Serial.print(currentThresholdDb);
+    Serial.println(F(" dB) -> Alert ON (Buzzer sounding)!"));
 
-    // Schedule background cloud update
+    // Immediately schedule cloud alert update to server
     pendingCloudNoiseSend = true;
     lastNoiseCloudSend = now;
   }
 
-  // 2. Alert OFF: Automatically turns OFF exactly after 3 seconds!
-  if (noiseAlertActive && (now - alertStartTime >= 3000)) {
-    noiseAlertActive = false;
-    dashboardAlertActive = false;
-    adminSilenceLockoutUntil = now + 1500; // 1.5-second echo grace period
-    soundInterruptFired = false;
-    digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
-    setStatusLed(false);
-    Serial.println(F("[Noise] 3 seconds complete -> Alert auto-turned OFF!"));
+  // 2. Alert OFF:
+  // - If it was a sound pulse and threshold is NOT below ambient: auto-turns OFF after 3 seconds!
+  // - If threshold is <= 25 dB (below ambient), it stays active until threshold is raised above 25 dB!
+  if (noiseAlertActive) {
+    if (!isAmbientBreach && !dashboardAlertActive && (now - alertStartTime >= 3000)) {
+      noiseAlertActive = false;
+      adminSilenceLockoutUntil = now + 1500; // 1.5-second echo grace period
+      soundInterruptFired = false;
+      digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
+      setStatusLed(false);
+      Serial.println(F("[Noise] 3 seconds complete & quiet verified -> Alert auto-turned OFF!"));
 
-    pendingCloudNoiseClear = true;
+      pendingCloudNoiseClear = true;
+    }
   }
 }
 
@@ -632,6 +648,14 @@ void sendStatusUpdate(bool force) {
           Serial.print(F("[Config] Synced noise threshold from dashboard: "));
           Serial.print(currentThresholdDb);
           Serial.println(F(" dB (Saved to EEPROM)"));
+
+          // If threshold was raised above ambient (>= 26 dB), normalize immediately!
+          if (currentThresholdDb >= 26 && !dashboardAlertActive) {
+            noiseAlertActive = false;
+            digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
+            setStatusLed(false);
+            pendingCloudNoiseClear = true;
+          }
         }
       }
     }
