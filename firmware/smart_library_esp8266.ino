@@ -94,7 +94,6 @@ unsigned long lastNoiseCloudSend  = 0; // Throttle cloud updates while noise is 
 bool pendingCloudNoiseSend    = false; // Non-blocking flag for background cloud update
 bool pendingCloudNoiseClear   = false;
 unsigned long adminSilenceLockoutUntil = 0; // Lockout window after admin silences alert (prevents re-trigger loop)
-unsigned long alarmStartTime = 0;           // Timestamp when alarm began sounding (for acoustic feedback immunity)
 
 // Hardware Interrupt for Sound Sensor (Catches microsecond sound spikes instantly)
 volatile bool soundInterruptFired = false;
@@ -211,13 +210,12 @@ void setupWebServer() {
     } else {
       dashboardAlertActive = false;
       noiseAlertActive = false;
-      adminSilenceLockoutUntil = millis() + 8000; // 8-second grace period: prevents re-trigger loop
+      adminSilenceLockoutUntil = millis() + 4000; // 4-second grace period: prevents re-trigger loop
       soundInterruptFired = false;
-      alarmStartTime = 0;
       digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
       setStatusLed(false);
-      localServer.send(200, "application/json", "{\"status\":\"alert_cleared\",\"buzzer\":false,\"lockout_sec\":8}");
-      Serial.println(F("[LAN HTTP] Direct Alert OFF command received -> Buzzer silenced & 8s lockout engaged!"));
+      localServer.send(200, "application/json", "{\"status\":\"alert_cleared\",\"buzzer\":false}");
+      Serial.println(F("[LAN HTTP] Direct Alert OFF command received -> Buzzer silenced & 4s lockout engaged!"));
     }
   });
 
@@ -453,54 +451,38 @@ void sampleSensors() {
     soundInterruptFired = false; // Reset interrupt latch
   }
 
-  // Admin Silence Lockout: if admin recently silenced alarm, ignore microphone triggers completely
+  // Admin Silence Lockout: if admin recently clicked Silence on dashboard, pause re-trigger for 4 seconds
   if (now < adminSilenceLockoutUntil) {
     soundPulse = false;
-  }
-
-  // Acoustic Feedback Immunity (Buzzer Self-Noise Prevention):
-  // When buzzer sounds continuously for > 2.5 seconds, provide a 600ms listening window
-  // to avoid microphone picking up buzzer sound as continuous breach.
-  if (noiseAlertActive && alarmStartTime > 0 && (now - alarmStartTime > 2500)) {
-    if (now - alarmStartTime < 3100) {
-      soundPulse = false; // Pause acoustic sampling during listening check window
-    } else {
-      alarmStartTime = now; // Reset cycle
-    }
   }
 
   // Realistic Decibel Estimation:
   int estimatedDb = soundPulse ? max(currentThresholdDb + 15, 75) : 25;
 
-  // Breach Condition:
-  bool isBreaching = (soundPulse && (now >= adminSilenceLockoutUntil)) || dashboardAlertActive;
+  // Breach Condition: sound detected by LM393 OR dashboard manual alert
+  bool isBreaching = soundPulse || dashboardAlertActive;
 
   if (isBreaching) {
     lastSoundBreachTime = now;
 
-    // IMMEDIATE LOCAL HARDWARE ALERT! (NO NETWORK WAITING)
+    // --- ALERT ON: Turn Buzzer ON immediately ---
     if (!noiseAlertActive) {
-      noiseAlertActive = true; // Hardware ticker & loop driver immediately start bip.bip.bip pulses!
-      alarmStartTime = now;
-      Serial.print(F("[Noise] Breach detected! Level: "));
+      noiseAlertActive = true;
+      Serial.print(F("[Noise] Noise detected ("));
       Serial.print(estimatedDb);
-      Serial.print(F(" dB (Threshold: "));
-      Serial.print(currentThresholdDb);
-      Serial.println(F(" dB) -> BUZZER ALERTING IMMEDIATELY!"));
+      Serial.println(F(" dB) -> Alert ON (Buzzer sounding)!"));
 
-      // Schedule background cloud update (never blocks the buzzer!)
+      // Schedule cloud update
       pendingCloudNoiseSend = true;
       lastNoiseCloudSend = now;
     }
   } else {
-    // Sound is currently below threshold:
-    // If noise has ceased for 1.2s and not locked by dashboard, stop buzzer immediately!
+    // --- ALERT OFF: When quiet for 1.2s and dashboard not locking, turn Buzzer OFF ---
     if (noiseAlertActive && !dashboardAlertActive && (now - lastSoundBreachTime >= 1200)) {
       noiseAlertActive = false;
-      alarmStartTime = 0;
       digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
       setStatusLed(false);
-      Serial.println(F("[Noise] Sanctuary restored tranquil quiet. Buzzer stopped."));
+      Serial.println(F("[Noise] Quiet restored -> Alert OFF (Buzzer stopped)."));
       pendingCloudNoiseClear = true;
     }
   }
@@ -665,12 +647,11 @@ void sendStatusUpdate(bool force) {
         if (dashboardAlertActive || noiseAlertActive) {
           dashboardAlertActive = false;
           noiseAlertActive = false;
-          adminSilenceLockoutUntil = millis() + 8000; // 8-second grace period: prevents re-trigger loop
+          adminSilenceLockoutUntil = millis() + 4000; // 4-second grace period: prevents re-trigger loop
           soundInterruptFired = false;
-          alarmStartTime = 0;
           digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
           setStatusLed(false);
-          Serial.println(F("[Noise] Dashboard signaled tranquil sanctuary. Alert stopped & 8s lockout engaged!"));
+          Serial.println(F("[Noise] Dashboard signaled tranquil sanctuary. Alert stopped immediately!"));
         }
       }
     }
