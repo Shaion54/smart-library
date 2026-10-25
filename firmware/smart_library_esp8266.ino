@@ -22,8 +22,8 @@
 // ==============================================================================
 // 1. Wi-Fi & Backend API Configuration (UPDATE THESE BEFORE UPLOADING)
 // ==============================================================================
-#define WIFI_SSID               "Loding......."
-#define WIFI_PASSWORD           "1234@4321.L"
+#define WIFI_SSID               "Smart Library"
+#define WIFI_PASSWORD           "12345612"
 
 // --- Choose Deployment Target: Vercel Cloud vs Local PC ---
 // Set USE_VERCEL_DEPLOYMENT to true for Vercel Cloud hosting.
