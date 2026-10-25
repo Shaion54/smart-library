@@ -93,6 +93,8 @@ unsigned long lastSoundBreachTime = 0; // Timestamp of latest sound detected abo
 unsigned long lastNoiseCloudSend  = 0; // Throttle cloud updates while noise is continuous
 bool pendingCloudNoiseSend    = false; // Non-blocking flag for background cloud update
 bool pendingCloudNoiseClear   = false;
+unsigned long adminSilenceLockoutUntil = 0; // Lockout window after admin silences alert (prevents re-trigger loop)
+unsigned long alarmStartTime = 0;           // Timestamp when alarm began sounding (for acoustic feedback immunity)
 
 // Hardware Interrupt for Sound Sensor (Catches microsecond sound spikes instantly)
 volatile bool soundInterruptFired = false;
@@ -209,10 +211,13 @@ void setupWebServer() {
     } else {
       dashboardAlertActive = false;
       noiseAlertActive = false;
+      adminSilenceLockoutUntil = millis() + 8000; // 8-second grace period: prevents re-trigger loop
+      soundInterruptFired = false;
+      alarmStartTime = 0;
       digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
       setStatusLed(false);
-      localServer.send(200, "application/json", "{\"status\":\"alert_cleared\",\"buzzer\":false}");
-      Serial.println(F("[LAN HTTP] Direct Alert OFF command received -> Buzzer silenced!"));
+      localServer.send(200, "application/json", "{\"status\":\"alert_cleared\",\"buzzer\":false,\"lockout_sec\":8}");
+      Serial.println(F("[LAN HTTP] Direct Alert OFF command received -> Buzzer silenced & 8s lockout engaged!"));
     }
   });
 
@@ -288,7 +293,7 @@ void setup() {
 
   // 6. Initialize Digital Sound Sensor DO Pin with hardware interrupt on pin D7 (GPIO13)
   pinMode(PIN_SOUND_DO, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_SOUND_DO), soundISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_SOUND_DO), soundISR, FALLING);
   Serial.println(F("[Setup] Sound sensor interrupt attached to pin D7 (Instant trigger enabled)."));
 
   // 7. Connect to Wi-Fi asynchronously in background
@@ -441,24 +446,34 @@ void sampleSensors() {
     sendStatusUpdate(true);
   }
 
-  // --- B. Sound Sensor Processing (INSTANT LOCAL ALERT - NO NETWORK WAIT) ---
+  // --- B. Sound Sensor Processing (INSTANT LOCAL ALERT WITH FEEDBACK IMMUNITY) ---
   bool rawPin = digitalRead(PIN_SOUND_DO);
   bool soundPulse = soundInterruptFired || (rawPin == SOUND_TRIGGER_LOGIC);
   if (soundInterruptFired) {
     soundInterruptFired = false; // Reset interrupt latch
   }
 
+  // Admin Silence Lockout: if admin recently silenced alarm, ignore microphone triggers completely
+  if (now < adminSilenceLockoutUntil) {
+    soundPulse = false;
+  }
+
+  // Acoustic Feedback Immunity (Buzzer Self-Noise Prevention):
+  // When buzzer sounds continuously for > 2.5 seconds, provide a 600ms listening window
+  // to avoid microphone picking up buzzer sound as continuous breach.
+  if (noiseAlertActive && alarmStartTime > 0 && (now - alarmStartTime > 2500)) {
+    if (now - alarmStartTime < 3100) {
+      soundPulse = false; // Pause acoustic sampling during listening check window
+    } else {
+      alarmStartTime = now; // Reset cycle
+    }
+  }
+
   // Realistic Decibel Estimation:
-  // LM393 DO pin triggers on acoustic breach.
-  // When sound pulse detected: elevated spike 75-78 dB.
-  // When tranquil & quiet: calm ambient 25 dB.
   int estimatedDb = soundPulse ? max(currentThresholdDb + 15, 75) : 25;
 
   // Breach Condition:
-  // 1. Real sound detected by LM393 (soundPulse)
-  // 2. OR threshold set below quiet ambient level (e.g. threshold set to 20 dB while quiet is 25 dB)
-  // 3. OR dashboard simulated test active
-  bool isBreaching = soundPulse || (25 >= currentThresholdDb) || dashboardAlertActive;
+  bool isBreaching = (soundPulse && (now >= adminSilenceLockoutUntil)) || dashboardAlertActive;
 
   if (isBreaching) {
     lastSoundBreachTime = now;
@@ -466,6 +481,7 @@ void sampleSensors() {
     // IMMEDIATE LOCAL HARDWARE ALERT! (NO NETWORK WAITING)
     if (!noiseAlertActive) {
       noiseAlertActive = true; // Hardware ticker & loop driver immediately start bip.bip.bip pulses!
+      alarmStartTime = now;
       Serial.print(F("[Noise] Breach detected! Level: "));
       Serial.print(estimatedDb);
       Serial.print(F(" dB (Threshold: "));
@@ -478,10 +494,10 @@ void sampleSensors() {
     }
   } else {
     // Sound is currently below threshold:
-    // If noise has ceased for 1.2s, stop buzzer immediately and restore sanctuary!
-    if (noiseAlertActive && (now - lastSoundBreachTime >= 1200)) {
+    // If noise has ceased for 1.2s and not locked by dashboard, stop buzzer immediately!
+    if (noiseAlertActive && !dashboardAlertActive && (now - lastSoundBreachTime >= 1200)) {
       noiseAlertActive = false;
-      dashboardAlertActive = false;
+      alarmStartTime = 0;
       digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
       setStatusLed(false);
       Serial.println(F("[Noise] Sanctuary restored tranquil quiet. Buzzer stopped."));
@@ -601,7 +617,6 @@ void sendStatusUpdate(bool force) {
   payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
   payload += "\"firmware_version\":\"" + String(FIRMWARE_VER) + "\",";
   payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
-  payload += "\"noise_detected\":" + String(noiseAlertActive ? "true" : "false") + ",";
   payload += "\"seats\":[";
   for (int i = 0; i < 4; i++) {
     payload += "{\"id\":\"" + String(SEAT_IDS[i]) + "\",\"is_occupied\":" + (seatOccupied[i] ? "true" : "false") + "}";
@@ -650,9 +665,12 @@ void sendStatusUpdate(bool force) {
         if (dashboardAlertActive || noiseAlertActive) {
           dashboardAlertActive = false;
           noiseAlertActive = false;
+          adminSilenceLockoutUntil = millis() + 8000; // 8-second grace period: prevents re-trigger loop
+          soundInterruptFired = false;
+          alarmStartTime = 0;
           digitalWrite(PIN_BUZZER, (BUZZER_ACTIVE_LOGIC == HIGH) ? LOW : HIGH);
           setStatusLed(false);
-          Serial.println(F("[Noise] Dashboard signaled tranquil sanctuary. Alert stopped immediately!"));
+          Serial.println(F("[Noise] Dashboard signaled tranquil sanctuary. Alert stopped & 8s lockout engaged!"));
         }
       }
     }

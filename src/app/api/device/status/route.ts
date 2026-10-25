@@ -61,12 +61,6 @@ export async function POST(req: NextRequest) {
           is_online: true,
           ...(firmware_version ? { firmware_version } : {}),
           ...(ip_address ? { ip_address } : {}),
-          ...(noise_detected !== undefined
-            ? {
-                noise_warning_active: noise_detected,
-                noise_warning_updated_at: nowIso,
-              }
-            : {}),
         },
         { onConflict: "id" }
       )

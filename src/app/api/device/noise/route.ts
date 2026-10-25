@@ -44,10 +44,10 @@ export async function POST(req: NextRequest) {
     const nowIso = getSyncedIso();
     const settings = await getNoiseSettings();
 
-    // Determine noise breach: either direct trigger or sound level >= configured threshold
-    const isBreached = typeof sound_level_db === "number"
-      ? sound_level_db >= settings.threshold_db
-      : noise_detected;
+    // Determine noise breach: only true if noise_detected is true AND meets/exceeds configured threshold
+    const isBreached = Boolean(noise_detected) && (
+      typeof sound_level_db === "number" ? sound_level_db >= settings.threshold_db : true
+    );
 
     const eventDetails = details || (
       isBreached

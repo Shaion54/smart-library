@@ -108,54 +108,153 @@ function formatBookingDate(isoString?: string): string {
   }
 }
 
-// Shared audio context singleton for seamless web browser buzzer alarms
-let globalAudioCtx: AudioContext | null = null;
+// Generate pure 8-bit PCM WAV buzzer alarm (3 rapid 1000Hz beeps) encoded as Base64 Data URI
+let cachedWavDataUri: string | null = null;
+function getBuzzerWavDataUri(): string {
+  if (cachedWavDataUri) return cachedWavDataUri;
+  const sampleRate = 8000;
+  const duration = 0.45; // 450ms: 3 beeps with gaps
+  const numSamples = Math.floor(sampleRate * duration);
+  const buffer = new Uint8Array(44 + numSamples);
 
-function getAudioContext(): AudioContext | null {
-  if (typeof window === "undefined") return null;
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) buffer[offset + i] = str.charCodeAt(i);
+  };
+  const writeU32 = (offset: number, val: number) => {
+    buffer[offset] = val & 0xff;
+    buffer[offset + 1] = (val >> 8) & 0xff;
+    buffer[offset + 2] = (val >> 16) & 0xff;
+    buffer[offset + 3] = (val >> 24) & 0xff;
+  };
+  const writeU16 = (offset: number, val: number) => {
+    buffer[offset] = val & 0xff;
+    buffer[offset + 1] = (val >> 8) & 0xff;
+  };
+
+  writeStr(0, "RIFF");
+  writeU32(4, 36 + numSamples);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  writeU32(16, 16);
+  writeU16(20, 1); // PCM
+  writeU16(22, 1); // Mono
+  writeU32(24, sampleRate);
+  writeU32(28, sampleRate);
+  writeU16(32, 1);
+  writeU16(34, 8); // 8-bit
+  writeStr(36, "data");
+  writeU32(40, numSamples);
+
+  // 3 loud square pulses at 1000 Hz
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const isBeeping = (t >= 0 && t < 0.10) || (t >= 0.15 && t < 0.25) || (t >= 0.30 && t < 0.40);
+    buffer[44 + i] = isBeeping ? (((t * 1000) % 1) < 0.5 ? 220 : 35) : 128;
+  }
+
+  let binary = "";
+  for (let i = 0; i < buffer.length; i++) {
+    binary += String.fromCharCode(buffer[i]);
+  }
+  cachedWavDataUri = "data:audio/wav;base64," + (typeof window !== "undefined" ? window.btoa(binary) : "");
+  return cachedWavDataUri;
+}
+
+let globalAudioCtx: AudioContext | null = null;
+let cachedBuzzerAudio: HTMLAudioElement | null = null;
+
+// Pre-warm and unlock audio drivers on first click/tap
+function unlockAudioEngines() {
+  if (typeof window === "undefined") return;
+  try {
+    if (!cachedBuzzerAudio) {
+      cachedBuzzerAudio = new Audio(getBuzzerWavDataUri());
+      cachedBuzzerAudio.volume = 1.0;
+    }
+    cachedBuzzerAudio.load();
+  } catch {}
   try {
     const AudioContextClass =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) return null;
-    if (!globalAudioCtx) {
-      globalAudioCtx = new AudioContextClass();
+    if (AudioContextClass) {
+      if (!globalAudioCtx) globalAudioCtx = new AudioContextClass();
+      if (globalAudioCtx.state === "suspended") {
+        globalAudioCtx.resume().then(() => {
+          if (globalAudioCtx) {
+            const buffer = globalAudioCtx.createBuffer(1, 1, 22050);
+            const source = globalAudioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(globalAudioCtx.destination);
+            source.start(0);
+          }
+        }).catch(() => {});
+      }
     }
-    if (globalAudioCtx.state === "suspended") {
-      globalAudioCtx.resume().catch(() => {});
-    }
-    return globalAudioCtx;
-  } catch {
-    return null;
-  }
+  } catch {}
 }
 
-// Synthesize rapid bip.bip.bip audio alert directly in browser via Web Audio API
-function playBrowserBuzzerBeep() {
-  const ctx = getAudioContext();
-  if (!ctx) return;
+function playOscillatorBeeps(ctx: AudioContext) {
   try {
     const now = ctx.currentTime;
-    // 3 rapid sharp pulses matching the hardware buzzer (880Hz square tone)
-    const pulses = [0, 0.13, 0.26];
-    pulses.forEach((timeOffset) => {
+    [0, 0.15, 0.30].forEach((offset) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
-      osc.type = "square";
-      osc.frequency.setValueAtTime(880, now + timeOffset);
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(1046.5, now + offset);
 
-      gain.gain.setValueAtTime(0, now + timeOffset);
-      gain.gain.linearRampToValueAtTime(0.3, now + timeOffset + 0.01);
-      gain.gain.linearRampToValueAtTime(0.3, now + timeOffset + 0.07);
-      gain.gain.linearRampToValueAtTime(0, now + timeOffset + 0.08);
+      gain.gain.setValueAtTime(0, now + offset);
+      gain.gain.linearRampToValueAtTime(0.6, now + offset + 0.02);
+      gain.gain.setValueAtTime(0.6, now + offset + 0.09);
+      gain.gain.linearRampToValueAtTime(0, now + offset + 0.10);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
-      osc.start(now + timeOffset);
-      osc.stop(now + timeOffset + 0.09);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.11);
     });
+  } catch (err) {
+    console.warn("Oscillator beep error:", err);
+  }
+}
+
+// Dual-Engine Browser Buzzer Sound: HTML5 Audio + Web Audio API Oscillator
+function playBrowserBuzzerBeep() {
+  if (typeof window === "undefined") return;
+
+  // Engine 1: HTML5 Audio with embedded base64 PCM WAV
+  try {
+    if (!cachedBuzzerAudio) {
+      cachedBuzzerAudio = new Audio(getBuzzerWavDataUri());
+      cachedBuzzerAudio.volume = 1.0;
+    }
+    cachedBuzzerAudio.currentTime = 0;
+    const playPromise = cachedBuzzerAudio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => {
+        // Pending browser user gesture unlock
+      });
+    }
+  } catch {}
+
+  // Engine 2: Web Audio API Oscillator (High C6 1046.5Hz Sawtooth Buzzer)
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (AudioContextClass) {
+      if (!globalAudioCtx) globalAudioCtx = new AudioContextClass();
+      const ctx = globalAudioCtx;
+      if (ctx.state === "suspended") {
+        ctx.resume().then(() => {
+          playOscillatorBeeps(ctx);
+        }).catch(() => {});
+      } else {
+        playOscillatorBeeps(ctx);
+      }
+    }
   } catch (e) {
     console.warn("Browser audio synthesizer error:", e);
   }
@@ -223,15 +322,18 @@ export default function AdminDashboardPage() {
   const supabase = createClient();
 
   // Unlock Web Audio context on first user interaction anywhere on the screen
+  // Unlock Web Audio context and audio drivers on user interaction anywhere on the screen
   useEffect(() => {
     const unlockAudio = () => {
-      getAudioContext();
+      unlockAudioEngines();
     };
-    window.addEventListener("click", unlockAudio, { once: true });
-    window.addEventListener("touchstart", unlockAudio, { once: true });
+    window.addEventListener("click", unlockAudio);
+    window.addEventListener("touchstart", unlockAudio);
+    window.addEventListener("keydown", unlockAudio);
     return () => {
       window.removeEventListener("click", unlockAudio);
       window.removeEventListener("touchstart", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
     };
   }, []);
 
@@ -495,56 +597,25 @@ export default function AdminDashboardPage() {
       fetch(`http://${device.ip_address}/threshold?val=${val}`).catch(() => {});
     }
 
-    // Breach detection logic:
-    // If ambient noise (e.g. 26 dB) is higher than new threshold (e.g. 20 dB) -> IMMEDIATELY TRIGGER BUZZER!
-    if (liveDb > val) {
-      if (!isAlertActive) {
-        await handleTriggerNoiseAlert(
-          liveDb,
-          `Noise threshold lowered to ${val} dB; current ambient ${liveDb} dB breached limit!`
-        );
-      }
-    } else {
-      // If threshold was raised above ambient noise (e.g. raised back to 26+ dB or 30 dB) -> SILENCE BUZZER!
-      if (isAlertActive) {
-        await handleClearNoiseAlert();
-        showToast(`Threshold raised to ${val} dB (above ambient ${liveDb} dB). Alert silenced!`, "info");
-      }
-    }
   };
 
-  // Live decibel wave display (reflects real ambient sound ~25-27 dB, or smooth decay after spike test)
+  // Live decibel wave display (reflects real ambient sound ~24-27 dB, or smooth decay after spike test)
   useEffect(() => {
     const dbInterval = setInterval(() => {
       setLiveDb((prev) => {
         // If a test spike occurred (e.g. 78 dB), smoothly decay back down to ambient!
-        if (prev > 35) {
+        if (prev > 30) {
           const nextVal = prev - Math.floor(Math.random() * 6 + 10);
-          if (nextVal <= soundThreshold) {
-            // Once decibel falls below threshold, automatically silence alert!
-            if (isAlertActive) {
-              handleClearNoiseAlert();
-            }
-          }
           return Math.max(25, nextVal);
         }
 
         // Peaceful ambient fluctuation around 24-27 dB (typically 26 dB)
         const delta = Math.floor(Math.random() * 3) - 1;
-        const ambient = Math.max(24, Math.min(27, prev + delta));
-
-        // If ambient sound breaches threshold (e.g. threshold lowered to 20 dB while ambient is 26 dB)
-        if (ambient > soundThreshold && !isAlertActive) {
-          handleTriggerNoiseAlert(ambient);
-        } else if (ambient <= soundThreshold && isAlertActive && prev <= 35) {
-          handleClearNoiseAlert();
-        }
-
-        return ambient;
+        return Math.max(24, Math.min(27, prev + delta));
       });
     }, 2000);
     return () => clearInterval(dbInterval);
-  }, [isAlertActive, soundThreshold, handleClearNoiseAlert, handleTriggerNoiseAlert]);
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -1111,6 +1182,21 @@ export default function AdminDashboardPage() {
                 className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:border-indigo-600 transition-colors"
               />
             </div>
+
+            {/* Test Alarm Sound Button */}
+            <button
+              type="button"
+              onClick={() => {
+                unlockAudioEngines();
+                playBrowserBuzzerBeep();
+                showToast("🔊 Test Alarm Sound playing now!", "info");
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200/80 transition-all active:scale-95 shadow-xs"
+              title="Click to test emergency buzzer alarm sound"
+            >
+              <Volume2 className="w-3.5 h-3.5 text-indigo-600" />
+              <span className="hidden sm:inline">Test Sound</span>
+            </button>
 
             {/* Notification Bell with Active Noise Warning Badge */}
             <div
@@ -1728,6 +1814,19 @@ export default function AdminDashboardPage() {
               {/* Action Buttons: Simulator & Clear */}
               <div className="flex flex-col gap-2.5">
                 <button
+                  type="button"
+                  onClick={() => {
+                    unlockAudioEngines();
+                    playBrowserBuzzerBeep();
+                    showToast("🔊 Browser alarm buzzer test played!", "info");
+                  }}
+                  className="w-full py-2.5 px-4 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2"
+                >
+                  <Volume2 className="w-4 h-4 text-indigo-600" />
+                  🔊 Test Browser Buzzer Sound (সাউন্ড টেস্ট)
+                </button>
+
+                <button
                   onClick={handleSimulateNoiseAlert}
                   disabled={isTriggeringAlert}
                   className="w-full py-3 px-4 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2"
@@ -2227,13 +2326,25 @@ export default function AdminDashboardPage() {
                   {isAudioMuted ? "Browser Audio Muted" : "Web Alarm Sounding"}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsAudioMuted(!isAudioMuted)}
-                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
-              >
-                {isAudioMuted ? "Unmute Sound" : "Mute Sound"}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    unlockAudioEngines();
+                    playBrowserBuzzerBeep();
+                  }}
+                  className="text-[11px] font-bold text-slate-700 hover:text-indigo-600 bg-white px-2 py-0.5 rounded-md border border-slate-200 shadow-xs cursor-pointer"
+                >
+                  🔊 Test Sound
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAudioMuted(!isAudioMuted)}
+                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                >
+                  {isAudioMuted ? "Unmute Sound" : "Mute Sound"}
+                </button>
+              </div>
             </div>
 
             {/* Action Buttons */}
