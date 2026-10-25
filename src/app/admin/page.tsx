@@ -349,6 +349,26 @@ export default function AdminDashboardPage() {
     return () => clearInterval(buzzerInterval);
   }, [isAlertActive, isAudioMuted]);
 
+  // Auto-turn OFF alert and close popup modal automatically after 3 seconds in browser
+  useEffect(() => {
+    if (!isAlertActive) return;
+    const autoDismissTimer = setTimeout(() => {
+      setIsAlertActive(false);
+      setIsNoisePopupOpen(false);
+      // Clean up in DB so hardware & other clients also normalize
+      fetch("/api/admin/trigger-hardware", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "clear",
+          sound_level_db: 25,
+          details: "Acoustic level normalized after 3-second alert cycle",
+        }),
+      }).catch(() => {});
+    }, 3000);
+    return () => clearTimeout(autoDismissTimer);
+  }, [isAlertActive]);
+
   useEffect(() => {
     setMounted(true);
     const timer = setInterval(() => setNow(Date.now()), 1000);
